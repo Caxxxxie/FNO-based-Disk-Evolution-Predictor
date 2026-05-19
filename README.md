@@ -84,3 +84,49 @@ values or a downsampled grid, keep the coordinate branch as
 `(r, sin(theta), cos(theta), tau)`, and train a one-step/few-step operator. If
 that works on coarse snapshots, then add the PDE residual and loss-balancing
 tricks from the PINN paper.
+
+## Mini demo
+
+I added a small smoke demo in `scripts/time_conditioned_operator_demo.py`.
+
+It does not use real time-dependent FARGO data yet. Instead, it asks a controlled
+question: if the target field changes over local time `tau`, does putting `tau`
+into the operator coordinate branch help? The demo builds a synthetic transient
+from an analytic initial disk profile to the bundled steady PPDONet `log_sigma`
+prediction, then compares two tiny operator nets:
+
+```text
+with time:    N(mu, r, sin(theta), cos(theta), tau)
+without time: N(mu, r, sin(theta), cos(theta))
+```
+
+Both models use the hard initial-condition form
+
+```text
+x_hat = x_0 + tau * residual
+```
+
+so `tau=0` is exact.
+
+Run:
+
+```bash
+python3.10 -m venv .venv
+.venv/bin/pip install -r requirements-demo.txt
+.venv/bin/python scripts/time_conditioned_operator_demo.py
+```
+
+One smoke result on a `12 x 24` grid:
+
+```text
+held-out time RMSE:
+  with tau    0.0327
+  without tau 0.0691
+```
+
+So yes, time as a coordinate variable is doing something reasonable: it roughly
+halves interpolation error across unseen times in this toy setup. The less nice
+part is held-out parameter generalization, which is still weak here. That points
+to the next real issue: time-conditioning helps temporal interpolation, but the
+branch encoding of `mu` and `x_n` needs more work before this becomes a serious
+operator surrogate.
