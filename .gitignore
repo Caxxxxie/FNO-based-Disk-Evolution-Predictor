@@ -1,5 +1,7 @@
 .venv/
-results/
+results/*
+!results/fargo_operator_benchmark/
+!results/fargo_operator_benchmark/**
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -12,3 +14,16 @@ __pycache__/
 *.out
 *.pdf
 *.synctex.gz
+fargo3d/bin/
+fargo3d/outputs/
+fargo3d/fargo3d
+fargo3d/arch/
+fargo3d/std/.lastflags*
+fargo3d/src/rescale.c
+fargo3d/src/var.c
+fargo3d/src/global_ex.h
+fargo3d/src/param.h
+fargo3d/src/param_noex.h
+fargo3d/scripts/*_bound.c
+fargo3d/scripts/bound_*.code
+fargo_data/*/raw/

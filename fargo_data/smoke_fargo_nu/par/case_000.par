@@ -1,0 +1,47 @@
+Setup               fargo_nu
+
+### Disk parameters
+
+AspectRatio         4.5000000000e-02
+Sigma0              1.0
+Alpha               5.0000000000e-04
+SigmaSlope          0.5
+FlaringIndex        0.0
+DampingZone         1.15
+TauDamp             0.3
+
+### Planet parameters
+
+PlanetConfig        /Users/cassie/1/PPDONet/fargo_data/smoke_fargo_nu/planets/case_000.cfg
+PlanetMass          5.0000000000e-04
+ThicknessSmoothing  0.6
+IndirectTerm        Yes
+
+### Mesh parameters
+
+Nx                  64
+Ny                  32
+Xmin               -3.14159265358979323844
+Xmax                3.14159265358979323844
+Ymin                0.4
+Ymax                2.5
+
+Spacing             N
+XMa                 0.1
+XMb                 0.2
+XMc                 5.0
+YMa                 0.1
+YMb                 0.2
+YMc                 5.0
+YMy0                1.0
+
+Frame               G
+OmegaFrame          1.0005
+
+### Output control parameters
+
+DT                  3.141592653590e-01
+Ninterm             4
+Ntot                24
+
+OutputDir           /Users/cassie/1/PPDONet/fargo_data/smoke_fargo_nu/raw/case_000
