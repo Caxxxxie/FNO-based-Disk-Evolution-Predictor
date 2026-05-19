@@ -1,0 +1,255 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+
+\newcommand{\muvec}{\bm{\mu}}
+\newcommand{\xfield}{\bm{x}}
+\newcommand{\loss}{\mathcal{L}}
+
+\title{Short Literature Review for Time-dependent PPDONet}
+\author{Project notes}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Goal}
+
+The original PPDONet learns a steady map from disk/planet parameters to final
+fields \cite{mao2023ppdonet}:
+\begin{equation}
+    G_{\mathrm{ss}}:\muvec=(\alpha,h_0,q)\mapsto
+    \xfield_{\mathrm{ss}}(r,\theta),
+\end{equation}
+where \(\xfield\) can mean \(\log\Sigma\), \(v_r\), or \(v_\theta\). The new
+project asks for a time-dependent surrogate. The simple version would be
+\begin{equation}
+    G:\left(\muvec,t\right)\mapsto \xfield(r,\theta,t),
+\end{equation}
+but the more practical version is a short-time evolution operator
+\begin{equation}
+    \Phi_{\Delta t}:\left(\muvec,\xfield_n\right)\mapsto \xfield_{n+1}.
+\end{equation}
+Then long rollout is just a few repeated operator calls:
+\begin{equation}
+    \xfield_K
+    =
+    \Phi_{\Delta t_K}\circ\cdots\circ\Phi_{\Delta t_1}
+    (\muvec,\xfield_0).
+\end{equation}
+
+\paragraph{Main intuition.}
+The time-dependent accretion-disk PINN paper \cite{timepinn2025disk} suggests
+that long-time training is much easier if we split time into local windows, hard
+enforce the initial state inside each window, use periodic angular features, and
+rescale outputs. I do not think we should copy it as a PINN directly. The more
+useful move is to turn that windowed solver idea into a reusable operator.
+
+\section{Two anchor papers}
+
+\paragraph{PPDONet.}
+PPDONet uses the DeepONet idea \cite{lu2021deeponet}: a branch network processes
+the system parameters and a trunk network processes coordinates. Their product
+gives the field value at \((r,\theta)\). This is nice for disk problems because
+the output is a function, not a fixed-resolution image. It already contains some
+important engineering choices: log transforms for stiff parameters, periodic
+encoding of \(\theta\), and separate models for \(\log\Sigma\), \(v_r\), and
+\(v_\theta\).
+
+\paragraph{Time-dependent disk PINN.}
+The PINN disk paper is useful mostly as a training recipe. It treats the PDE
+residual seriously, but it also makes several very practical moves: train over
+short time intervals, enforce the initial condition by construction, use
+periodic coordinate features, scale outputs, and balance loss terms. For our
+project, these are more valuable than the exact PINN architecture.
+
+\section{Model options}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{p{0.22\linewidth}p{0.33\linewidth}p{0.33\linewidth}}
+\toprule
+Model & Why it might work & Main risk \\
+\midrule
+Time-conditioned DeepONet
+& Smallest change from PPDONet. Put local time \(\tau\) in the trunk:
+\((r,\sin\theta,\cos\theta,\tau)\).
+& It may interpolate time well but still struggle with generalizing across new
+input states \(\xfield_n\). \\
+\addlinespace
+State-conditioned DeepONet
+& Add sensors or a downsampled encoding of \(\xfield_n\) to the branch. This
+turns the model into a real propagator.
+& Sensor choice matters; too few sensors lose structures, too many make training
+heavy. \\
+\addlinespace
+FNO / U-FNO
+& Fourier neural operators \cite{li2021fno} and U-FNO-style variants
+\cite{wen2022uno} are natural for grid-to-grid time stepping.
+& Less resolution-free than DeepONet; polar grid and boundaries need care. \\
+\addlinespace
+PINO
+& Physics-informed neural operator \cite{li2021pino} combines operator learning
+with PDE residual losses. Good match if we have sparse time snapshots.
+& PDE residuals can dominate or destabilize training without careful weighting. \\
+\addlinespace
+Multiwavelet operator
+& Multiwavelet operators \cite{gupta2021mwt} can represent localized structures
+better than pure Fourier bases.
+& More implementation work; probably not the first baseline. \\
+\bottomrule
+\end{tabular}
+\caption{Reasonable model swaps for the project.}
+\end{table}
+
+\paragraph{Recommended order.}
+Start with time-conditioned/state-conditioned DeepONet, because it reuses the
+existing code and gives a clean ablation. Then try FNO/U-FNO as the grid-to-grid
+baseline. If we later add PDE residuals, call it a PINO-style extension rather
+than a totally new model.
+
+\section{How to add time practically}
+
+\subsection{Version 0: time as a coordinate}
+
+The smallest change is
+\begin{equation}
+    \hat{\xfield}
+    =
+    N_\theta(\muvec,r,\sin\theta,\cos\theta,\tau).
+\end{equation}
+This is useful for interpolation between snapshots of the same run, but it is
+not yet a proper evolution operator because it does not know the current state.
+It is still worth doing as a smoke test.
+
+\subsection{Version 1: hard-IC local window}
+
+For a local window starting from \(\xfield_n\), use
+\begin{equation}
+    \hat{\xfield}(\muvec,\xfield_n,r,\theta,\tau)
+    =
+    \xfield_n(r,\theta)
+    +
+    A(\tau)
+    R_\theta(\muvec,E(\xfield_n),r,\sin\theta,\cos\theta,\tau),
+\end{equation}
+with \(A(0)=0\), for example \(A(\tau)=\tau\). This guarantees
+\begin{equation}
+    \hat{\xfield}(\tau=0)=\xfield_n.
+\end{equation}
+This one detail matters a lot. Otherwise the model wastes capacity relearning
+the left boundary of every time window.
+
+\subsection{Version 2: few-step rollout}
+
+Train the same local operator on many windows:
+\begin{equation}
+    \Phi_{\Delta t}(\muvec,\xfield_n)=\hat{\xfield}(\tau=1).
+\end{equation}
+At inference:
+\begin{equation}
+    \xfield_{n+1}=\Phi_{\Delta t}(\muvec,\xfield_n).
+\end{equation}
+This is the most practical ``time-dependent PPDONet'' story: the model is still
+an operator, but now the operator maps one field to the next field.
+
+\section{Loss design}
+
+The baseline supervised loss is
+\begin{equation}
+    \loss_{\mathrm{data}}
+    =
+    \|\hat{\xfield}(r,\theta,\tau)-\xfield_{\mathrm{FARGO}}(r,\theta,\tau)\|_2^2.
+\end{equation}
+For time-dependent training, this is not enough. The useful loss stack is:
+\begin{equation}
+    \loss =
+    \lambda_d\loss_{\mathrm{data}}
+    +\lambda_{\mathrm{ic}}\loss_{\mathrm{ic}}
+    +\lambda_{\mathrm{pde}}\loss_{\mathrm{pde}}
+    +\lambda_{\mathrm{roll}}\loss_{\mathrm{roll}}
+    +\lambda_{\mathrm{ss}}\loss_{\mathrm{ss}}.
+\end{equation}
+
+\paragraph{Initial condition.}
+If we use the hard-IC ansatz above, \(\loss_{\mathrm{ic}}\) is basically zero by
+construction. This is better than merely adding a penalty.
+
+\paragraph{PDE residual.}
+The PINN/PINO idea is to add hydrodynamic residuals using autodiff in
+\((r,\theta,\tau)\) \cite{raissi2019pinn,li2021pino}. In practice I would not
+turn this on first. First get supervised window prediction working. Then add the
+residual with a small weight and monitor whether it improves rollout stability.
+
+\paragraph{Rollout consistency.}
+If the model is trained one step at a time, it may still drift in multi-step
+rollout. Add a short unrolled loss:
+\begin{equation}
+    \loss_{\mathrm{roll}}
+    =
+    \sum_{j=1}^J
+    \|\hat{\xfield}_{n+j}-\xfield_{n+j}\|_2^2.
+\end{equation}
+Use \(J=2\) or \(3\) first. Long unrolls are expensive and can make optimization
+annoying.
+
+\paragraph{Steady-state anchor.}
+The old PPDONet can act as a soft late-time target:
+\begin{equation}
+    \loss_{\mathrm{ss}}
+    =
+    \|\hat{\xfield}(T)-G_{\mathrm{ss}}(\muvec)\|_2^2.
+\end{equation}
+This is biased if the true simulation has not reached the same steady state, so
+it should be weak or only used near late times. Still, it is a nice way to make
+the old baseline useful.
+
+\paragraph{Loss balancing.}
+PINNs often fail because one term dominates the gradients
+\cite{wang2021pinnloss}. The time-dependent disk PINN paper also points in this
+direction. For us, a practical recipe is:
+\begin{enumerate}[leftmargin=*]
+    \item normalize each field separately;
+    \item start with data loss only;
+    \item add PDE residual after the supervised model is sane;
+    \item use gradient-norm or running-loss balancing for \(\lambda\)'s;
+    \item use causal/time-window weighting so early-time errors are fixed before
+    later-time errors \cite{wang2022causality}.
+\end{enumerate}
+
+\section{What looks most promising}
+
+\paragraph{First real experiment.}
+Use FARGO snapshots if available. Train a local DeepONet propagator:
+\begin{equation}
+    (\muvec, E(\xfield_n), r,\sin\theta,\cos\theta,\tau)
+    \mapsto
+    \xfield(r,\theta,t_n+\tau\Delta t).
+\end{equation}
+The state encoder \(E\) can initially be just fixed sensors or a coarse grid
+flattened through an MLP.
+
+\paragraph{Ablations.}
+The important ablations are small and clear:
+\begin{enumerate}[leftmargin=*]
+    \item no time input vs time input;
+    \item soft IC penalty vs hard-IC ansatz;
+    \item parameter-only branch vs parameter-plus-state branch;
+    \item one-step loss vs two-step rollout loss;
+    \item data-only vs data-plus-PDE residual.
+\end{enumerate}
+
+\paragraph{My current bet.}
+Time as a trunk coordinate will help temporal interpolation, but the real
+project lives or dies on the state branch \(E(\xfield_n)\). Without that, the
+model is closer to a movie interpolator for a known run. With it, it becomes an
+actual evolution operator.
+
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\end{document}

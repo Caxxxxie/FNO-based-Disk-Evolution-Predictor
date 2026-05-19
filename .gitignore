@@ -3,3 +3,12 @@ results/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.pdf
+*.synctex.gz
