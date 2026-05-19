@@ -29,11 +29,18 @@ class FargoCase:
     planet_mass: float
 
 
+# Keep the default smoke sweep inside the bundled PPDONet/paper parameter
+# domain. In particular, ASPECTRATIO should not go below 0.05, otherwise the
+# steady PPDONet baseline is queried outside its training support.
+ASPECT_RATIO_MIN = 0.05
+ASPECT_RATIO_MAX = 0.10
+
+
 SMOKE_CASES = [
-    FargoCase(alpha=5.0e-4, aspect_ratio=0.045, planet_mass=5.0e-4),
-    FargoCase(alpha=1.0e-3, aspect_ratio=0.050, planet_mass=1.0e-3),
-    FargoCase(alpha=2.0e-3, aspect_ratio=0.055, planet_mass=1.5e-3),
-    FargoCase(alpha=7.0e-4, aspect_ratio=0.060, planet_mass=7.0e-4),
+    FargoCase(alpha=5.0e-4, aspect_ratio=0.050, planet_mass=5.0e-4),
+    FargoCase(alpha=1.0e-3, aspect_ratio=0.060, planet_mass=1.0e-3),
+    FargoCase(alpha=2.0e-3, aspect_ratio=0.075, planet_mass=1.5e-3),
+    FargoCase(alpha=7.0e-4, aspect_ratio=0.090, planet_mass=7.0e-4),
 ]
 
 
@@ -52,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-run", action="store_true")
     parser.add_argument("--keep-raw", action="store_true")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "fargo_data")
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "data")
     return parser.parse_args()
 
 
@@ -76,7 +83,7 @@ def cases_from_args(args: argparse.Namespace) -> list[FargoCase]:
             cases.append(
                 FargoCase(
                     alpha=float(10.0 ** rng.uniform(-3.5, -2.5)),
-                    aspect_ratio=float(rng.uniform(0.04, 0.07)),
+                    aspect_ratio=float(rng.uniform(ASPECT_RATIO_MIN, ASPECT_RATIO_MAX)),
                     planet_mass=float(10.0 ** rng.uniform(-3.5, -2.7)),
                 )
             )

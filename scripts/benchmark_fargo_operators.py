@@ -24,7 +24,7 @@ import optax
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PPDONET_ROOT = ROOT / "PPDONET"
+PPDONET_ROOT = ROOT / "ppdonet"
 jax.config.update("jax_platforms", "cpu")
 
 
@@ -39,7 +39,7 @@ class MetricRow:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=Path, default=ROOT / "fargo_data" / "smoke_fargo_nu" / "dataset.npz")
+    parser.add_argument("--dataset", type=Path, default=ROOT / "data" / "smoke_fargo_nu" / "dataset.npz")
     parser.add_argument("--steps", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--width", type=int, default=32)
@@ -48,6 +48,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--modes-r", type=int, default=8)
     parser.add_argument("--modes-theta", type=int, default=12)
     parser.add_argument("--lr", type=float, default=2e-3)
+    parser.add_argument("--rollout-weight", type=float, default=1.0)
+    parser.add_argument("--grad-clip-norm", type=float, default=1.0)
+    parser.add_argument(
+        "--heldout-case",
+        type=int,
+        default=1,
+        help="Parameter case to hold out. Negative values count from the end.",
+    )
+    parser.add_argument(
+        "--heldout-cases",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Parameter cases to hold out. Overrides --heldout-case.",
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--speed-repeats", type=int, default=10)
     parser.add_argument("--no-pretrained-ppdonet", action="store_true")
@@ -66,9 +81,12 @@ def normalize_params(params: np.ndarray) -> np.ndarray:
     values = params.astype(np.float32).copy()
     values[:, 0] = np.log10(values[:, 0])
     values[:, 2] = np.log10(values[:, 2])
-    center = np.asarray([-3.0, 0.055, -3.0], dtype=np.float32)
-    scale = np.asarray([0.8, 0.03, 0.8], dtype=np.float32)
-    return (values - center) / scale
+    # Match the bundled PPDONet training domain:
+    # log10(alpha) in [-3.52, -1], ASPECTRATIO in [0.05, 0.1],
+    # log10(planetmass) in [-4.3, -2.7].
+    lower = np.asarray([-3.52, 0.05, -4.3], dtype=np.float32)
+    upper = np.asarray([-1.0, 0.10, -2.7], dtype=np.float32)
+    return (2.0 * (values - 0.5 * (lower + upper)) / (upper - lower)).astype(np.float32)
 
 
 def coordinate_grid(r: np.ndarray, theta: np.ndarray) -> np.ndarray:
@@ -86,6 +104,13 @@ def state_features(x: np.ndarray) -> np.ndarray:
     pooled = x0.reshape((x0.shape[0], 4, x0.shape[1] // 4, 8, x0.shape[2] // 8)).mean(axis=(2, 4))
     stats = np.stack([x0.mean(axis=(1, 2)), x0.std(axis=(1, 2))], axis=-1)
     return np.concatenate([stats, pooled.reshape((x0.shape[0], -1))], axis=-1).astype(np.float32)
+
+
+def state_features_jax(x: jnp.ndarray) -> jnp.ndarray:
+    x0 = x[..., 0]
+    pooled = x0.reshape((x0.shape[0], 4, x0.shape[1] // 4, 8, x0.shape[2] // 8)).mean(axis=(2, 4))
+    stats = jnp.stack([x0.mean(axis=(1, 2)), x0.std(axis=(1, 2))], axis=-1)
+    return jnp.concatenate([stats, pooled.reshape((x0.shape[0], -1))], axis=-1)
 
 
 def load_dataset(path: Path):
@@ -135,6 +160,16 @@ def make_final_data(x, params, times, param_ids, mean, std):
     }
 
 
+def add_two_step_target(data, fields, param_ids, start_ids, mean, std):
+    targets = []
+    for p in param_ids:
+        for sid in start_ids:
+            targets.append(((fields[p, sid + 2] - mean) / std)[..., None])
+    data = dict(data)
+    data["two_step_target"] = jnp.asarray(np.stack(targets, axis=0).astype(np.float32))
+    return data
+
+
 class SpectralConv2D(hk.Module):
     def __init__(self, out_channels: int, modes_r: int, modes_theta: int, name: str | None = None):
         super().__init__(name=name)
@@ -145,15 +180,20 @@ class SpectralConv2D(hk.Module):
     def __call__(self, x):
         batch, ny, nx, in_channels = x.shape
         x_ft = jnp.fft.rfft2(x, axes=(1, 2))
-        mr = min(self.modes_r, ny)
+        mr = min(self.modes_r, ny // 2)
         mt = min(self.modes_theta, nx // 2 + 1)
         scale = 1.0 / math.sqrt(in_channels * self.out_channels)
-        real = hk.get_parameter("weight_real", (mr, mt, in_channels, self.out_channels), init=hk.initializers.RandomNormal(scale))
-        imag = hk.get_parameter("weight_imag", (mr, mt, in_channels, self.out_channels), init=hk.initializers.RandomNormal(scale))
-        weight = real + 1j * imag
+        real_pos = hk.get_parameter("weight_pos_real", (mr, mt, in_channels, self.out_channels), init=hk.initializers.RandomNormal(scale))
+        imag_pos = hk.get_parameter("weight_pos_imag", (mr, mt, in_channels, self.out_channels), init=hk.initializers.RandomNormal(scale))
+        real_neg = hk.get_parameter("weight_neg_real", (mr, mt, in_channels, self.out_channels), init=hk.initializers.RandomNormal(scale))
+        imag_neg = hk.get_parameter("weight_neg_imag", (mr, mt, in_channels, self.out_channels), init=hk.initializers.RandomNormal(scale))
+        weight_pos = real_pos + 1j * imag_pos
+        weight_neg = real_neg + 1j * imag_neg
         out_ft = jnp.zeros((batch, ny, nx // 2 + 1, self.out_channels), dtype=jnp.complex64)
-        low = jnp.einsum("bhwi,hwio->bhwo", x_ft[:, :mr, :mt, :], weight)
-        out_ft = out_ft.at[:, :mr, :mt, :].set(low)
+        low_pos = jnp.einsum("bhwi,hwio->bhwo", x_ft[:, :mr, :mt, :], weight_pos)
+        low_neg = jnp.einsum("bhwi,hwio->bhwo", x_ft[:, -mr:, :mt, :], weight_neg)
+        out_ft = out_ft.at[:, :mr, :mt, :].set(low_pos)
+        out_ft = out_ft.at[:, -mr:, :mt, :].set(low_neg)
         return jnp.fft.irfft2(out_ft, s=(ny, nx), axes=(1, 2))
 
 
@@ -182,7 +222,7 @@ def make_param_deeponet(coords, latent, width, use_time: bool, use_state: bool, 
         branch = hk.nets.MLP([width, width, latent], activation=jax.nn.tanh)(branch_input)
         y = jnp.einsum("bl,nl->bn", branch, trunk) / math.sqrt(latent)
         y = y.reshape((b, ny, nx, 1))
-        return x + y if residual else y
+        return x + batch["dt"][:, None, None, :] * y if residual else y
 
     return hk.without_apply_rng(hk.transform(forward))
 
@@ -195,7 +235,7 @@ def make_fno(coords, width, modes_r, modes_theta, depth):
             pointwise = hk.Linear(width, name=f"pointwise_{i}")(h)
             h = jax.nn.gelu(spectral + pointwise)
         residual = hk.nets.MLP([width, 1], activation=jax.nn.gelu)(h)
-        return batch["x"] + residual
+        return batch["x"] + batch["dt"][:, None, None, :] * residual
 
     return hk.without_apply_rng(hk.transform(forward))
 
@@ -203,15 +243,15 @@ def make_fno(coords, width, modes_r, modes_theta, depth):
 def make_pointwise(coords, width, depth):
     def forward(batch):
         residual = hk.nets.MLP([width] * depth + [1], activation=jax.nn.gelu)(grid_inputs(batch, coords))
-        return batch["x"] + residual
+        return batch["x"] + batch["dt"][:, None, None, :] * residual
 
     return hk.without_apply_rng(hk.transform(forward))
 
 
-def train_and_eval(model, train, evals, args, seed_offset=0):
+def train_and_eval(model, train, evals, args, seed_offset=0, rollout_train=None):
     key = jax.random.PRNGKey(args.seed + seed_offset)
     params = model.init(key, {k: v[:1] for k, v in train.items()})
-    opt = optax.adam(args.lr)
+    opt = optax.chain(optax.clip_by_global_norm(args.grad_clip_norm), optax.adam(args.lr))
     opt_state = opt.init(params)
 
     @jax.jit
@@ -220,17 +260,42 @@ def train_and_eval(model, train, evals, args, seed_offset=0):
         return jnp.mean((pred - batch["y"]) ** 2)
 
     @jax.jit
+    def rollout_loss_fn(params, batch, rollout_batch):
+        pred = model.apply(params, batch)
+        one_step = jnp.mean((pred - batch["y"]) ** 2)
+        x1 = model.apply(params, rollout_batch)
+        batch2 = dict(rollout_batch)
+        batch2["x"] = x1
+        batch2["state"] = state_features_jax(x1)
+        x2 = model.apply(params, batch2)
+        rollout = jnp.mean((x2 - rollout_batch["two_step_target"]) ** 2)
+        return one_step + args.rollout_weight * rollout
+
+    @jax.jit
     def train_step(params, opt_state, batch):
         loss, grads = jax.value_and_grad(loss_fn)(params, batch)
         updates, opt_state = opt.update(grads, opt_state, params)
         return optax.apply_updates(params, updates), opt_state, loss
 
+    @jax.jit
+    def rollout_train_step(params, opt_state, batch, rollout_batch):
+        loss, grads = jax.value_and_grad(rollout_loss_fn)(params, batch, rollout_batch)
+        updates, opt_state = opt.update(grads, opt_state, params)
+        return optax.apply_updates(params, updates), opt_state, loss
+
     n = train["x"].shape[0]
+    n_rollout = 0 if rollout_train is None else rollout_train["x"].shape[0]
     for _ in range(args.steps):
         key, subkey = jax.random.split(key)
         idx = jax.random.randint(subkey, (args.batch_size,), 0, n)
         batch = {k: v[idx] for k, v in train.items()}
-        params, opt_state, _ = train_step(params, opt_state, batch)
+        if rollout_train is None:
+            params, opt_state, _ = train_step(params, opt_state, batch)
+        else:
+            key, rollout_key = jax.random.split(key)
+            ridx = jax.random.randint(rollout_key, (args.batch_size,), 0, n_rollout)
+            rollout_batch = {k: v[ridx] for k, v in rollout_train.items()}
+            params, opt_state, _ = rollout_train_step(params, opt_state, batch, rollout_batch)
 
     def rmse(data):
         return float(jnp.sqrt(loss_fn(params, data)))
@@ -251,13 +316,12 @@ def train_and_eval(model, train, evals, args, seed_offset=0):
 
 
 def rollout_two_steps(model, params, data, test_case_index=3):
-    x0 = data["x"][:1]
-    y2 = data["two_step_target"][:1]
-    batch = {k: v[:1] for k, v in data.items() if k != "two_step_target"}
+    y2 = data["two_step_target"]
+    batch = {k: v for k, v in data.items() if k != "two_step_target"}
     x1 = model.apply(params, batch)
     batch2 = dict(batch)
     batch2["x"] = x1
-    batch2["state"] = jnp.asarray(state_features(np.asarray(x1)))
+    batch2["state"] = state_features_jax(x1)
     x2 = model.apply(params, batch2)
     return float(jnp.sqrt(jnp.mean((x2 - y2) ** 2)))
 
@@ -271,7 +335,7 @@ def persistence_metrics(train, param_eval, time_eval, rollout_data, args):
         y = param_eval["x"]
     _ = np.asarray(y).shape
     speed = (time.perf_counter() - start) * 1000.0 / args.speed_repeats
-    two = float(jnp.sqrt(jnp.mean((rollout_data["x"][:1] - rollout_data["two_step_target"][:1]) ** 2)))
+    two = float(jnp.sqrt(jnp.mean((rollout_data["x"] - rollout_data["two_step_target"]) ** 2)))
     return MetricRow(rmse(train), rmse(param_eval), rmse(time_eval), two, speed)
 
 
@@ -328,7 +392,7 @@ def pretrained_ppdonet_metrics(pred, speed_fn, fields, train_case_ids, heldout_c
                 ps.append(pred_norm[p])
         return float(np.sqrt(np.mean((np.stack(ps) - np.stack(ys)) ** 2)))
 
-    two_target = (fields[heldout_case_ids, 6] - mean) / std
+    two_target = (fields[heldout_case_ids, -1] - mean) / std
     two_pred = pred_norm[heldout_case_ids]
     param_eval_ids = np.repeat(heldout_case_ids, len(train_starts))
     return MetricRow(
@@ -346,22 +410,41 @@ def main():
     fields, params, raw_params, r, theta, times, meta = load_dataset(args.dataset)
     coords = coordinate_grid(r, theta)
 
-    train_case_ids = np.asarray([0, 1, 2])
-    heldout_case_ids = np.asarray([3])
-    train_starts = np.asarray([0, 1, 2, 3, 4])
-    heldout_time_starts = np.asarray([5])
+    n_cases = fields.shape[0]
+    raw_heldout_cases = args.heldout_cases if args.heldout_cases is not None else [args.heldout_case]
+    heldout_cases = [case if case >= 0 else n_cases + case for case in raw_heldout_cases]
+    if any(case < 0 or case >= n_cases for case in heldout_cases):
+        raise ValueError(f"heldout cases {raw_heldout_cases} are outside 0..{n_cases - 1}")
+    heldout_case_ids = np.asarray(sorted(set(heldout_cases)))
+    train_case_ids = np.asarray([i for i in range(n_cases) if i not in set(heldout_case_ids.tolist())])
+    if train_case_ids.size == 0:
+        raise ValueError("At least one training case is required")
+    if fields.shape[1] < 4:
+        raise ValueError("At least four frames are required for one-step and two-step tests")
+    train_starts = np.arange(0, fields.shape[1] - 2)
+    heldout_time_starts = np.asarray([fields.shape[1] - 2])
 
     mean = float(fields[train_case_ids][:, train_starts].mean())
     std = float(fields[train_case_ids][:, train_starts].std() + 1.0e-6)
 
     step_train = make_step_data(fields, params, times, train_case_ids, train_starts, mean, std)
+    rollout_train_starts = train_starts[train_starts + 2 < fields.shape[1]]
+    rollout_train = add_two_step_target(
+        make_step_data(fields, params, times, train_case_ids, rollout_train_starts, mean, std),
+        fields,
+        train_case_ids,
+        rollout_train_starts,
+        mean,
+        std,
+    )
     step_param = make_step_data(fields, params, times, heldout_case_ids, train_starts, mean, std)
     step_time = make_step_data(fields, params, times, train_case_ids, heldout_time_starts, mean, std)
     final_train = make_final_data(fields, params, times, train_case_ids, mean, std)
     final_param = make_final_data(fields, params, times, heldout_case_ids, mean, std)
 
-    rollout_data = make_step_data(fields, params, times, heldout_case_ids, np.asarray([4]), mean, std)
-    two_target = ((fields[heldout_case_ids, 6] - mean) / std)[..., None].astype(np.float32)
+    rollout_start = fields.shape[1] - 3
+    rollout_data = make_step_data(fields, params, times, heldout_case_ids, np.asarray([rollout_start]), mean, std)
+    two_target = ((fields[heldout_case_ids, -1] - mean) / std)[..., None].astype(np.float32)
     rollout_data["two_step_target"] = jnp.asarray(two_target)
 
     model_specs = {
@@ -431,7 +514,15 @@ def main():
     for i, key in enumerate(args.models):
         name, model, train, param_eval, time_eval, rollout_eval = model_specs[key]
         print(f"Training {name}...")
-        trained_params, rmse, speed = train_and_eval(model, train, {}, args, seed_offset=10 * i)
+        use_rollout_train = rollout_eval is not None and args.rollout_weight > 0.0
+        trained_params, rmse, speed = train_and_eval(
+            model,
+            train,
+            {},
+            args,
+            seed_offset=10 * i,
+            rollout_train=rollout_train if use_rollout_train else None,
+        )
         two_step = None
         if rollout_eval is not None:
             two_step = rollout_two_steps(model, trained_params, rollout_eval)
@@ -455,10 +546,19 @@ def main():
             "depth": args.depth,
             "modes_r": args.modes_r,
             "modes_theta": args.modes_theta,
+            "train_case_ids": train_case_ids.tolist(),
+            "heldout_case_ids": heldout_case_ids.tolist(),
             "normalization_mean": mean,
             "normalization_std": std,
+            "rollout_weight": args.rollout_weight,
+            "grad_clip_norm": args.grad_clip_norm,
             "metric_units": "RMSE in normalized log_sigma units",
-            "note": "Tiny FARGO3D sanity benchmark: 4 cases, 7 frames, 32x64 grid. Held-out parameter is one case; held-out time is the last one-step window on train cases.",
+            "note": (
+                f"Tiny FARGO3D sanity benchmark: {fields.shape[0]} cases, "
+                f"{fields.shape[1]} frames, {fields.shape[2]}x{fields.shape[3]} grid. "
+                "Held-out parameter cases are excluded from training; held-out time is "
+                "the last one-step window on train cases."
+            ),
             "dataset_meta": meta,
         },
         "results": results,

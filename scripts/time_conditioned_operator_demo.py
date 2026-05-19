@@ -34,7 +34,7 @@ import pandas as pd
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PPDONET_ROOT = ROOT / "PPDONET"
+PPDONET_ROOT = ROOT / "ppdonet"
 sys.path.insert(0, PPDONET_ROOT.as_posix())
 
 import onet_disk2D.grids  # noqa: E402
