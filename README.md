@@ -66,13 +66,18 @@ For a quick local check, reduce `--steps`. For the real run, use the server:
   --depth 3 \
   --modes-r 8 \
   --modes-theta 12 \
-  --models state_deeponet pointwise fno \
+  --channels log_sigma v_r v_theta \
+  --models state_deeponet pointwise fno fno_flow \
+  --train-spans 1 2 3 \
+  --consistency-weight 0.1 \
+  --consistency-spans 1 1 \
   --rollout-weight 0.25 \
   --speed-repeats 5 \
-  --no-pretrained-ppdonet \
   --output-dir results/poc12_operator_benchmark
 ```
 
-The benchmark always reports persistence, then trains the selected simple
-one-step models. The FNO variant is the main proof-of-concept model; the
-state-conditioned DeepONet and pointwise residual model are sanity baselines.
+The benchmark always reports persistence and, by default, calls the bundled
+pretrained PPDONet checkpoints as a steady time-independent baseline. It then
+trains the selected one-step models on the requested channels. The FNO variant
+is the main proof-of-concept model; the state-conditioned DeepONet and pointwise
+residual model are sanity baselines.

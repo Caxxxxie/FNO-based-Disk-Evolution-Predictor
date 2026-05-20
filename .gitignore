@@ -8,6 +8,7 @@ __pycache__/
 # Local datasets and experiment outputs are reproducible/generated.
 data/
 results/
+documents/
 
 # LaTeX/editor build products.
 *.aux
