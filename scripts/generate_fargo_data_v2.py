@@ -450,6 +450,26 @@ def main() -> None:
         np.save(dataset_dir / "v_r_background.npy", background_v_r)
         np.save(dataset_dir / "v_theta_background.npy", background_v_theta)
 
+    time_meta = {
+        "scale": args.time_scale,
+        "dt_requested": args.dt,
+        "cadence": "uniform FARGO3D saved frames; nonuniform selection is deferred to training",
+    }
+    if args.time_scale == "fixed":
+        time_meta.update(
+            {
+                "fixed_total_time": args.fixed_total_time,
+                "definition": "Fixed physical integration time in FARGO code units; 2*pi corresponds to one orbit at r=1.",
+            }
+        )
+    else:
+        time_meta.update(
+            {
+                "tqs_factor": args.tqs_factor,
+                "definition": "T_qs = 0.314 * t_nu, t_nu = 1 / (alpha * h^2) in code units",
+            }
+        )
+
     meta = {
         "dataset_name": args.dataset_name,
         "setup": "fargo_nu",
@@ -463,12 +483,7 @@ def main() -> None:
         },
         "grid": {"ny": args.ny, "nx": args.nx, "ymin": args.ymin, "ymax": args.ymax},
         "frames": args.frames,
-        "time": {
-            "scale": args.time_scale,
-            "tqs_factor": args.tqs_factor,
-            "definition": "T_qs = 0.314 * t_nu, t_nu = 1 / (alpha * h^2) in code units",
-            "cadence": "uniform FARGO3D saved frames; nonuniform selection is deferred to training",
-        },
+        "time": time_meta,
         "channels": {
             "state": ["log_sigma", "delta_v_r", "delta_v_theta"],
             "also_saved": ["v_r", "v_theta", "v_r_background", "v_theta_background"],
