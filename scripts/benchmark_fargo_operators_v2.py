@@ -71,8 +71,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--width", type=int, default=48)
     parser.add_argument("--depth", type=int, default=4)
-    parser.add_argument("--modes-r", type=int, default=12)
+    parser.add_argument("--modes-r", type=int, default=12, help="Legacy 2D-FNO option; v2 uses nonperiodic radial local conv.")
     parser.add_argument("--modes-theta", type=int, default=24)
+    parser.add_argument("--radial-kernel-size", type=int, default=5)
     parser.add_argument("--lr", type=float, default=2.0e-3)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=7)
@@ -105,6 +106,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("temporal train + validation fractions must be < 1")
     if any(span <= 0 for span in args.fno_spans + args.fno_flow_spans + args.consistency_spans):
         raise ValueError("all spans must be positive")
+    if args.radial_kernel_size <= 0 or args.radial_kernel_size % 2 == 0:
+        raise ValueError("--radial-kernel-size must be a positive odd integer")
     return args
 
 
@@ -315,39 +318,39 @@ def estimate_normalization(
     return mean, std
 
 
-class SpectralConv2D(hk.Module):
-    def __init__(self, out_channels: int, modes_r: int, modes_theta: int, name: str | None = None):
+class ThetaSpectralRadialConv(hk.Module):
+    """Periodic Fourier mixing in theta plus nonperiodic local mixing in radius."""
+
+    def __init__(self, out_channels: int, modes_theta: int, radial_kernel_size: int, name: str | None = None):
         super().__init__(name=name)
         self.out_channels = out_channels
-        self.modes_r = modes_r
         self.modes_theta = modes_theta
+        self.radial_kernel_size = radial_kernel_size
 
     def __call__(self, x):
         batch, ny, nx, in_channels = x.shape
-        x_ft = jnp.fft.rfft2(x, axes=(1, 2))
-        mr = min(self.modes_r, ny // 2)
+        x_ft = jnp.fft.rfft(x, axis=2)
         mt = min(self.modes_theta, nx // 2 + 1)
         scale = 1.0 / math.sqrt(in_channels * self.out_channels)
-        real_pos = hk.get_parameter(
-            "weight_pos_real", (mr, mt, in_channels, self.out_channels), init=hk.initializers.RandomNormal(scale)
+        real = hk.get_parameter(
+            "theta_weight_real", (mt, in_channels, self.out_channels), init=hk.initializers.RandomNormal(scale)
         )
-        imag_pos = hk.get_parameter(
-            "weight_pos_imag", (mr, mt, in_channels, self.out_channels), init=hk.initializers.RandomNormal(scale)
+        imag = hk.get_parameter(
+            "theta_weight_imag", (mt, in_channels, self.out_channels), init=hk.initializers.RandomNormal(scale)
         )
-        real_neg = hk.get_parameter(
-            "weight_neg_real", (mr, mt, in_channels, self.out_channels), init=hk.initializers.RandomNormal(scale)
-        )
-        imag_neg = hk.get_parameter(
-            "weight_neg_imag", (mr, mt, in_channels, self.out_channels), init=hk.initializers.RandomNormal(scale)
-        )
-        weight_pos = real_pos + 1j * imag_pos
-        weight_neg = real_neg + 1j * imag_neg
+        weight = real + 1j * imag
         out_ft = jnp.zeros((batch, ny, nx // 2 + 1, self.out_channels), dtype=jnp.complex64)
-        low_pos = jnp.einsum("bhwi,hwio->bhwo", x_ft[:, :mr, :mt, :], weight_pos)
-        low_neg = jnp.einsum("bhwi,hwio->bhwo", x_ft[:, -mr:, :mt, :], weight_neg)
-        out_ft = out_ft.at[:, :mr, :mt, :].set(low_pos)
-        out_ft = out_ft.at[:, -mr:, :mt, :].set(low_neg)
-        return jnp.fft.irfft2(out_ft, s=(ny, nx), axes=(1, 2))
+        low_theta = jnp.einsum("byki,kio->byko", x_ft[:, :, :mt, :], weight)
+        out_ft = out_ft.at[:, :, :mt, :].set(low_theta)
+        theta_mixed = jnp.fft.irfft(out_ft, n=nx, axis=2)
+        radial_mixed = hk.Conv2D(
+            self.out_channels,
+            kernel_shape=(self.radial_kernel_size, 1),
+            padding="SAME",
+            with_bias=False,
+            name="radial_local",
+        )(x)
+        return theta_mixed + radial_mixed
 
 
 def grid_inputs(batch, coords):
@@ -359,11 +362,25 @@ def grid_inputs(batch, coords):
     return jnp.concatenate([x, coord, cond], axis=-1)
 
 
-def make_fno(coords, width, modes_r, modes_theta, depth, output_channels: int, residual: bool = True):
+def make_fno(
+    coords,
+    width,
+    modes_r,
+    modes_theta,
+    depth,
+    output_channels: int,
+    residual: bool = True,
+    radial_kernel_size: int = 5,
+):
     def forward(batch):
         h = hk.Linear(width)(grid_inputs(batch, coords))
         for i in range(depth):
-            spectral = SpectralConv2D(width, modes_r, modes_theta, name=f"spectral_{i}")(h)
+            spectral = ThetaSpectralRadialConv(
+                width,
+                modes_theta,
+                radial_kernel_size,
+                name=f"theta_spectral_radial_{i}",
+            )(h)
             pointwise = hk.Linear(width, name=f"pointwise_{i}")(h)
             h = jax.nn.gelu(spectral + pointwise)
         y = hk.nets.MLP([width, output_channels], activation=jax.nn.gelu)(h)
@@ -683,7 +700,15 @@ def summarize_splits(pair_splits: dict[str, np.ndarray]) -> dict:
 
 
 def run_model(name, ds, coords, train_cases, val_cases, test_cases, pair_splits, spans, args, mean, std, seed_offset):
-    model = make_fno(coords, args.width, args.modes_r, args.modes_theta, args.depth, ds.n_channels)
+    model = make_fno(
+        coords,
+        args.width,
+        args.modes_r,
+        args.modes_theta,
+        args.depth,
+        ds.n_channels,
+        radial_kernel_size=args.radial_kernel_size,
+    )
     use_consistency = name == "fno_flow" and args.consistency_weight > 0.0
     params, history = train_model(
         name,
@@ -795,6 +820,8 @@ def main() -> None:
             "depth": args.depth,
             "modes_r": args.modes_r,
             "modes_theta": args.modes_theta,
+            "radial_kernel_size": args.radial_kernel_size,
+            "operator_geometry": "theta Fourier spectral conv + nonperiodic radial local conv",
             "fno_spans": args.fno_spans,
             "fno_flow_spans": args.fno_flow_spans,
             "temporal_bins": args.temporal_bins,
