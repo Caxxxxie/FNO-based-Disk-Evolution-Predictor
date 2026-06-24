@@ -16,6 +16,7 @@ import argparse
 import json
 import math
 import os
+import pickle
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -69,7 +70,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--models", nargs="+", default=["fno"], choices=["fno", "fno_flow"])
     parser.add_argument("--steps", type=int, default=5000)
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--width", type=int, default=48)
     parser.add_argument("--depth", type=int, default=4)
     parser.add_argument("--modes-r", type=int, default=12, help="Legacy 2D-FNO option; v2 uses nonperiodic radial local conv.")
@@ -101,6 +102,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early-stop-min-delta", type=float, default=1.0e-4)
     parser.add_argument("--jax-platform", choices=["default", "cpu", "gpu"], default="default")
     parser.add_argument("--save-loss-plots", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--save-checkpoints", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
     if args.jax_platform != "default":
         jax.config.update("jax_platforms", args.jax_platform)
@@ -874,6 +876,8 @@ def save_loss_plot(history_by_model: dict[str, list[dict]], output_dir: Path) ->
         steps = [row["step"] for row in rows]
         fig, ax = plt.subplots(figsize=(7, 4))
         batch_values = np.asarray([row.get("batch_rmse", 0.0) for row in rows], dtype=np.float64)
+        train_values = np.asarray([row.get("train_rmse", np.nan) for row in rows], dtype=np.float64)
+        val_values = np.asarray([row.get("validation_rmse", np.nan) for row in rows], dtype=np.float64)
         for key, label in [
             ("batch_rmse", "batch"),
             ("train_rmse", "train"),
@@ -890,11 +894,25 @@ def save_loss_plot(history_by_model: dict[str, list[dict]], output_dir: Path) ->
             ax.plot(steps, smooth, linewidth=2.0, label=f"batch ma{window}")
         ax.set_xlabel("step")
         ax.set_ylabel("RMSE")
-        ax.set_yscale("log")
+        ax.set_title(f"{name} loss curve")
         ax.grid(True, alpha=0.25)
         ax.legend()
         fig.tight_layout()
         fig.savefig(output_dir / f"loss_{name}.png", dpi=180)
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        if np.any(np.isfinite(train_values)):
+            ax.plot(steps, train_values, marker="o", linewidth=1.8, label="train")
+        if np.any(np.isfinite(val_values)):
+            ax.plot(steps, val_values, marker="o", linewidth=1.8, label="validation")
+        ax.set_xlabel("step")
+        ax.set_ylabel("RMSE")
+        ax.set_title(f"{name} train/validation loss")
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(output_dir / f"loss_{name}_train_val.png", dpi=180)
         plt.close(fig)
 
 
@@ -908,6 +926,62 @@ def summarize_splits(pair_splits: dict[str, np.ndarray]) -> dict:
             bins[str(int(bin_id))] = bins.get(str(int(bin_id)), 0) + 1
         summary[split] = {"pairs": int(rows.shape[0]), "spans": spans, "bins": bins}
     return summary
+
+
+def save_model_checkpoint(
+    output_dir: Path,
+    name: str,
+    params: hk.Params,
+    ds: FargoMemmapDataset,
+    args: argparse.Namespace,
+    mean: np.ndarray,
+    std: np.ndarray,
+    pair_splits: dict[str, np.ndarray],
+) -> Path:
+    checkpoint = {
+        "format": "fargo_operator_v3_fno_checkpoint",
+        "model": name,
+        "params": jax.tree_util.tree_map(lambda x: np.asarray(x), jax.device_get(params)),
+        "channels": list(ds.channels),
+        "mean": np.asarray(mean, dtype=np.float32),
+        "std": np.asarray(std, dtype=np.float32),
+        "dataset": str(args.dataset),
+        "model_config": {
+            "width": args.width,
+            "depth": args.depth,
+            "modes_r": args.modes_r,
+            "modes_theta": args.modes_theta,
+            "radial_kernels": list(args.radial_kernels),
+            "radial_dilations": list(args.radial_dilations),
+            "radial_padding": args.radial_padding,
+            "residual": True,
+            "time_input_units": args.time_input_units,
+            "dt_units": args.dt_units,
+        },
+        "training_config": {
+            "steps": args.steps,
+            "batch_size": args.batch_size,
+            "learning_rate": args.lr,
+            "grad_clip_norm": args.grad_clip_norm,
+            "seed": args.seed,
+            "loss_weighting": args.loss_weighting,
+            "temporal_bins": args.temporal_bins,
+            "temporal_train_frac": args.temporal_train_frac,
+            "temporal_val_frac": args.temporal_val_frac,
+            "fno_spans": list(args.fno_spans),
+            "fno_flow_spans": list(args.fno_flow_spans),
+        },
+        "case_splits": {
+            "train": np.asarray(ds.train_cases, dtype=np.int32),
+            "validation": np.asarray(ds.validation_cases, dtype=np.int32),
+            "test": np.asarray(ds.test_cases, dtype=np.int32),
+        },
+        "temporal_pair_splits": {split: np.asarray(rows, dtype=np.int32) for split, rows in pair_splits.items()},
+    }
+    path = output_dir / f"{name}_checkpoint.pkl"
+    with path.open("wb") as f:
+        pickle.dump(checkpoint, f, protocol=pickle.HIGHEST_PROTOCOL)
+    return path
 
 
 def run_model(
@@ -952,6 +1026,9 @@ def run_model(
         seed_offset,
         use_consistency,
     )
+    if args.save_checkpoints:
+        checkpoint_path = save_model_checkpoint(args.output_dir, name, params, ds, args, mean, std, pair_splits)
+        print(f"Saved {name} checkpoint to {checkpoint_path}")
     speed_batch = make_batch(ds, np.random.default_rng(args.seed + 333), test_cases if test_cases.size else train_cases, pair_splits["test"], args.batch_size, mean, std)
     rollout = evaluate_rollout(
         model,
@@ -1172,6 +1249,8 @@ def main() -> None:
             "rel_l2_floor": args.rel_l2_floor,
             "fno_spans": args.fno_spans,
             "fno_flow_spans": args.fno_flow_spans,
+            "rollout_horizon": args.rollout_horizon,
+            "save_checkpoints": args.save_checkpoints,
             "temporal_bins": args.temporal_bins,
             "normalization_mean": dict(zip(args.channels, mean.tolist())),
             "normalization_std": dict(zip(args.channels, std.tolist())),
