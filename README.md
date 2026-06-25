@@ -1,4 +1,4 @@
-# Time-Dependent PPDONet
+# FNO-based Disk Evolution Predictor
 
 This repository keeps the original steady PPDONet code and the FARGO3D solver
 alongside a small set of time-dependent operator experiments.
