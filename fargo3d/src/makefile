@@ -126,6 +126,11 @@ else
 CUDA_LIB = ${CUDA}/lib
 endif
 endif
+ifdef CUDA_ARCH
+CUDA_ARCH_OPT = -arch=${CUDA_ARCH}
+else
+CUDA_ARCH_OPT =
+endif
 # Python include
 ifndef PYTHON_INCLUDE
 PYTHON_INCLUDE = /usr/include/python3.8
@@ -140,7 +145,7 @@ PARACC_LINUX  = mpicc
 LIBS_LINUX    = -lm
 INC_LINUX     = 
 NVCC_LINUX    = nvcc
-CUDAOPT_LINUX = -O3 -w #-arch=sm_XX # try utils/cuda/get_cuda_sm.sh
+CUDAOPT_LINUX = -O3 -w ${CUDA_ARCH_OPT} #-arch=sm_XX # try utils/cuda/get_cuda_sm.sh
 PARAINC_LINUX = 
 PARALIB_LINUX =
 CUDAINC_LINUX = -I${CUDA}/include/
