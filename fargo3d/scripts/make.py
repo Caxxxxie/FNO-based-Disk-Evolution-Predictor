@@ -67,7 +67,7 @@ def complete_parameters(base,params):
     return params
 
 def check_coherence(base,params):
-    for key in params.keys():
+    for key in list(params.keys()):
             if key in base:
                 continue
             else:
