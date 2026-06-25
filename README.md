@@ -97,10 +97,10 @@ fargo_benchmark.py  orchestration used by the CLI script
 fno.py              small shared FNO utilities for earlier steady demos
 ```
 
-The main method is `fno_flow`: a time-conditioned disk FNO that predicts the
-state increment over a requested time interval, trained on multiple temporal
-spans with an optional semigroup consistency loss. The `fno` option uses the
-same architecture without the semigroup term and is kept as a one-step ablation.
+The v3 experiment compares two variants of the same time-conditioned disk FNO.
+`fno` is the one-step ablation. `fno_flow` is the main hypothesis: the same
+operator trained on multiple temporal spans with an optional semigroup
+consistency loss. Report both against their matching persistence baselines.
 
 Generate a larger memmap dataset with `scripts/generate_fargo_data_v2.py`, then
 run:
@@ -114,6 +114,12 @@ run:
   --output-dir results/fargo_operator_benchmark_v3
 ```
 
+Summarize a finished run:
+
+```bash
+python scripts/summarize_fargo_metrics.py results/fargo_operator_benchmark_v3/metrics.json
+```
+
 On the NCSA Jupyter server, after generating the full v2 dataset under
 `fargo_data_v2/data/fargo_transient_10orbits_128f`, start with a short training
 smoke test:
@@ -122,7 +128,7 @@ smoke test:
 python scripts/benchmark_fargo_operators_v3.py \
   --dataset fargo_data_v2/data/fargo_transient_10orbits_128f \
   --output-dir results/server_v3_smoke \
-  --models fno_flow \
+  --models fno fno_flow \
   --steps 200 \
   --batch-size 4 \
   --width 32 \
@@ -141,8 +147,8 @@ For a longer run, increase capacity and steps:
 ```bash
 python scripts/benchmark_fargo_operators_v3.py \
   --dataset fargo_data_v2/data/fargo_transient_10orbits_128f \
-  --output-dir results/server_v3_fno_flow_w64_d4 \
-  --models fno_flow \
+  --output-dir results/server_v3_compare_w64_d4 \
+  --models fno fno_flow \
   --steps 12000 \
   --batch-size 8 \
   --width 64 \
