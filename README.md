@@ -97,10 +97,11 @@ fargo_benchmark.py  orchestration used by the CLI script
 fno.py              small shared FNO utilities for earlier steady demos
 ```
 
-The v3 experiment compares two variants of the same time-conditioned disk FNO.
-`fno` is the one-step ablation. `fno_flow` is the main hypothesis: the same
-operator trained on multiple temporal spans with an optional semigroup
-consistency loss. Report both against their matching persistence baselines.
+The v3 implementation centers on `fno`: a time-conditioned disk FNO that learns
+the transient field-to-field update. `fno_flow` is an extension of the same
+model family that adds multi-span training and optional semigroup consistency.
+Use `fno` as the main baseline, then report whether `fno_flow` improves held-out
+time/parameter and rollout metrics against the same persistence baselines.
 
 Generate a larger memmap dataset with `scripts/generate_fargo_data_v2.py`, then
 run:
@@ -108,7 +109,7 @@ run:
 ```bash
 .venv/bin/python scripts/benchmark_fargo_operators_v3.py \
   --dataset data/fargo_transient_10orbits_128f \
-  --models fno fno_flow \
+  --models fno \
   --steps 5000 \
   --batch-size 8 \
   --output-dir results/fargo_operator_benchmark_v3
@@ -128,7 +129,7 @@ smoke test:
 python scripts/benchmark_fargo_operators_v3.py \
   --dataset fargo_data_v2/data/fargo_transient_10orbits_128f \
   --output-dir results/server_v3_smoke \
-  --models fno fno_flow \
+  --models fno \
   --steps 200 \
   --batch-size 4 \
   --width 32 \
@@ -137,12 +138,35 @@ python scripts/benchmark_fargo_operators_v3.py \
   --eval-every 50 \
   --eval-batches 4 \
   --normalization-samples 256 \
-  --fno-flow-spans 1 2 4 \
   --rollout-horizons 1 2 4 8 \
   --jax-platform gpu
 ```
 
-For a longer run, increase capacity and steps:
+For a longer main FNO run, increase capacity and steps:
+
+```bash
+python scripts/benchmark_fargo_operators_v3.py \
+  --dataset fargo_data_v2/data/fargo_transient_10orbits_128f \
+  --output-dir results/server_v3_fno_w64_d4 \
+  --models fno \
+  --steps 12000 \
+  --batch-size 8 \
+  --width 64 \
+  --depth 4 \
+  --modes-theta 32 \
+  --lr 8e-4 \
+  --warmup-steps 500 \
+  --min-lr-ratio 0.05 \
+  --eval-every 250 \
+  --eval-batches 24 \
+  --normalization-samples 2048 \
+  --fno-spans 1 \
+  --rollout-horizon 16 \
+  --rollout-horizons 1 2 4 8 16 \
+  --jax-platform gpu
+```
+
+Then run the FNO-flow extension as a controlled comparison:
 
 ```bash
 python scripts/benchmark_fargo_operators_v3.py \
@@ -160,6 +184,7 @@ python scripts/benchmark_fargo_operators_v3.py \
   --eval-every 250 \
   --eval-batches 24 \
   --normalization-samples 2048 \
+  --fno-spans 1 \
   --fno-flow-spans 1 2 4 8 \
   --consistency-weight 0.02 \
   --consistency-spans 2 2 \

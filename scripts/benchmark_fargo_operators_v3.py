@@ -25,9 +25,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        default=["fno_flow"],
+        default=["fno"],
         choices=["fno", "fno_flow"],
-        help="fno_flow is the main semigroup-regularized operator; fno is the one-step ablation.",
+        help="fno is the main v3 baseline; fno_flow is the multi-span/semigroup extension.",
     )
     parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--batch-size", type=int, default=8)

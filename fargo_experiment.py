@@ -23,7 +23,7 @@ from fargo_outputs import ModelResult, speed_ms_per_batch
 
 @dataclass(frozen=True)
 class OperatorMethod:
-    """Training recipe for one time-conditioned operator variant."""
+    """Training recipe for one v3 FNO variant."""
 
     name: str
     spans: tuple[int, ...]

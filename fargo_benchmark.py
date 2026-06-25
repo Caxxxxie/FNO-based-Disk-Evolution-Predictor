@@ -105,7 +105,7 @@ def run_benchmark(args) -> None:
             f"Method {method.name}: spans={list(method.spans)} "
             f"consistency_weight={method.consistency_weight}"
         )
-    primary_method = next((method for method in methods if method.name == "fno_flow"), methods[0])
+    primary_method = next((method for method in methods if method.name == "fno"), methods[0])
     primary_pair_splits = pair_splits_by_method[primary_method.name]
     norm_rng = np.random.default_rng(args.seed + 111)
     mean, std = estimate_normalization(ds, norm_rng, primary_pair_splits["train"], args.normalization_samples)
