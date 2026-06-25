@@ -98,10 +98,12 @@ fno.py              small shared FNO utilities for earlier steady demos
 ```
 
 The v3 implementation centers on `fno`: a time-conditioned disk FNO that learns
-the transient field-to-field update. `fno_flow` is an extension of the same
-model family that adds multi-span training and optional semigroup consistency.
-Use `fno` as the main baseline, then report whether `fno_flow` improves held-out
-time/parameter and rollout metrics against the same persistence baselines.
+the transient field-to-field update. `pointwise` is the main non-operator
+baseline: it receives the same state, coordinate, parameter, and time inputs as
+FNO, but applies a residual MLP independently at each grid point with no spatial
+or spectral mixing. Persistence is still reported as a no-change sanity check,
+not as the scientific baseline to beat. `fno_flow` is an extension of the same
+FNO family that adds multi-span training and optional semigroup consistency.
 
 Generate a larger memmap dataset with `scripts/generate_fargo_data_v2.py`, then
 run:
@@ -109,7 +111,7 @@ run:
 ```bash
 .venv/bin/python scripts/benchmark_fargo_operators_v3.py \
   --dataset data/fargo_transient_10orbits_128f \
-  --models fno \
+  --models pointwise fno \
   --steps 5000 \
   --batch-size 8 \
   --output-dir results/fargo_operator_benchmark_v3
@@ -132,12 +134,37 @@ python scripts/summarize_fargo_metrics.py \
   results/v3_local_tune_fno_rollh4_w005_800/metrics.json
 ```
 
+To run the stronger local baseline comparison, use the same optimizer and
+rollout-loss settings for `pointwise` and `fno`:
+
+```bash
+python scripts/benchmark_fargo_operators_v3.py \
+  --dataset data/v3_local16f24_64x32 \
+  --output-dir results/v3_local_compare_pointwise_fno \
+  --models pointwise fno \
+  --steps 800 \
+  --batch-size 2 \
+  --width 32 \
+  --depth 3 \
+  --modes-theta 16 \
+  --lr 8e-4 \
+  --warmup-steps 100 \
+  --min-lr-ratio 0.05 \
+  --pointwise-spans 1 \
+  --fno-spans 1 \
+  --rollout-train-weight 0.05 \
+  --rollout-train-horizon 4 \
+  --rollout-horizon 8 \
+  --rollout-horizons 1 2 4 8
+```
+
 On the current 16-case local v3 dataset, span-1 FNO is the strongest default;
 multi-span training is treated as an extension to validate, not the default. The
 best local tuning run so far uses `--width 32 --depth 3 --modes-theta 16
 --batch-size 2 --steps 800 --lr 8e-4 --rollout-train-weight 0.05
---rollout-train-horizon 4`, reducing held-out parameter/time error from the
-persistence baseline's 5.57% to 2.85%, and rollout@8 from 22.74% to 11.01%.
+--rollout-train-horizon 4`, giving 2.85% held-out parameter/time error and
+rollout@8 of 11.01%. Compare this against `pointwise` before using persistence
+numbers in the main discussion.
 
 On the NCSA Jupyter server, after generating the full v2 dataset under
 `fargo_data_v2/data/fargo_transient_10orbits_128f`, start with a short training

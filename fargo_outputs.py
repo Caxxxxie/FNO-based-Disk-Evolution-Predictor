@@ -134,10 +134,12 @@ def save_model_checkpoint(
     std: np.ndarray,
     pair_splits: dict[str, np.ndarray],
 ) -> Path:
+    architecture = "pointwise_residual_mlp" if name == "pointwise" else "disk_fno"
     checkpoint = {
-        "format": "fargo_operator_v3_fno_checkpoint",
+        "format": "fargo_operator_v3_checkpoint",
         "model": name,
         "method": name,
+        "architecture": architecture,
         "params": jax.tree_util.tree_map(lambda x: np.asarray(x), jax.device_get(params)),
         "channels": list(ds.channels),
         "mean": np.asarray(mean, dtype=np.float32),
@@ -167,6 +169,7 @@ def save_model_checkpoint(
             "temporal_bins": args.temporal_bins,
             "temporal_train_frac": args.temporal_train_frac,
             "temporal_val_frac": args.temporal_val_frac,
+            "pointwise_spans": list(args.pointwise_spans),
             "fno_spans": list(args.fno_spans),
             "fno_flow_spans": list(args.fno_flow_spans),
             "consistency_weight": args.consistency_weight,

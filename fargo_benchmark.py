@@ -21,12 +21,26 @@ from fargo_outputs import (
     summarize_splits,
     to_jsonable,
 )
-from fargo_model import FargoFNOConfig, make_fargo_fno
+from fargo_model import FargoFNOConfig, FargoPointwiseConfig, make_fargo_fno, make_fargo_pointwise
 from fargo_training import TrainingConfig, train_operator_model
 
 
-def make_operator_model(args, coords, output_channels: int):
-    return make_fargo_fno(coords, FargoFNOConfig.from_args(args, output_channels))
+def make_operator_model(method_name: str, args, coords, output_channels: int):
+    if method_name == "pointwise":
+        return make_fargo_pointwise(coords, FargoPointwiseConfig.from_args(args, output_channels))
+    if method_name in {"fno", "fno_flow"}:
+        return make_fargo_fno(coords, FargoFNOConfig.from_args(args, output_channels))
+    raise ValueError(f"Unknown method: {method_name}")
+
+
+def method_family(method_name: str) -> str:
+    if method_name == "pointwise":
+        return "pointwise residual MLP baseline; no spatial or spectral mixing"
+    if method_name == "fno":
+        return "time-conditioned residual disk FNO"
+    if method_name == "fno_flow":
+        return "multi-span/semigroup extension of the residual disk FNO"
+    return method_name
 
 
 def run_model(
@@ -39,7 +53,7 @@ def run_model(
     std,
     loss_weights,
 ):
-    model = make_operator_model(args, coords, ds.n_channels)
+    model = make_operator_model(method.name, args, coords, ds.n_channels)
     train_config = TrainingConfig.from_args(args)
     training_result = train_operator_model(
         method.name,
@@ -157,6 +171,7 @@ def run_benchmark(args) -> None:
             "dt_units": args.dt_units,
             "loss_weighting": args.loss_weighting,
             "rel_l2_floor": args.rel_l2_floor,
+            "pointwise_spans": args.pointwise_spans,
             "fno_spans": args.fno_spans,
             "fno_flow_spans": args.fno_flow_spans,
             "rollout_horizon": args.rollout_horizon,
@@ -175,6 +190,7 @@ def run_benchmark(args) -> None:
             },
             "methods": {
                 method.name: {
+                    "family": method_family(method.name),
                     "spans": list(method.spans),
                     "consistency_weight": method.consistency_weight,
                     "uses_semigroup_loss": method.uses_semigroup_loss,

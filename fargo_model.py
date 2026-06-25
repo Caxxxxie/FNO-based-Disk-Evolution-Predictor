@@ -57,6 +57,28 @@ class FargoFNOConfig:
             raise ValueError("radial_padding must be one of: zero, edge, reflect")
 
 
+@dataclass(frozen=True)
+class FargoPointwiseConfig:
+    """Architecture for a residual MLP applied independently at each grid point."""
+
+    width: int = 48
+    depth: int = 4
+    output_channels: int = 3
+    residual: bool = True
+
+    @classmethod
+    def from_args(cls, args, output_channels: int) -> "FargoPointwiseConfig":
+        return cls(width=args.width, depth=args.depth, output_channels=output_channels)
+
+    def validate(self) -> None:
+        if self.width <= 0:
+            raise ValueError("width must be positive")
+        if self.depth <= 0:
+            raise ValueError("depth must be positive")
+        if self.output_channels <= 0:
+            raise ValueError("output_channels must be positive")
+
+
 def pad_radial(x, pad: int, mode: str):
     if pad == 0:
         return x
@@ -156,6 +178,20 @@ def make_fargo_fno(coords: np.ndarray, config: FargoFNOConfig):
     return hk.without_apply_rng(hk.transform(forward))
 
 
+def make_fargo_pointwise(coords: np.ndarray, config: FargoPointwiseConfig):
+    """Create the non-operator residual baseline with no spatial mixing."""
+    config.validate()
+
+    def forward(batch):
+        residual = hk.nets.MLP(
+            [config.width] * config.depth + [config.output_channels],
+            activation=jax.nn.gelu,
+        )(time_conditioned_grid_inputs(batch, coords))
+        return batch["x"] + batch["dt"][:, None, None, :] * residual if config.residual else residual
+
+    return hk.without_apply_rng(hk.transform(forward))
+
+
 def make_time_conditioned_fno(
     coords: np.ndarray,
     width: int,
@@ -179,4 +215,3 @@ def make_time_conditioned_fno(
         radial_padding=radial_padding,
     )
     return make_fargo_fno(coords, config)
-

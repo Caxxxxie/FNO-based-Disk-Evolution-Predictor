@@ -26,8 +26,11 @@ def parse_args() -> argparse.Namespace:
         "--models",
         nargs="+",
         default=["fno"],
-        choices=["fno", "fno_flow"],
-        help="fno is the main v3 baseline; fno_flow is the multi-span/semigroup extension.",
+        choices=["pointwise", "fno", "fno_flow"],
+        help=(
+            "Trainable models to run. pointwise is the non-operator residual MLP baseline; "
+            "fno is the main v3 model; fno_flow is the multi-span/semigroup extension."
+        ),
     )
     parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -51,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temporal-bins", type=int, default=8)
     parser.add_argument("--temporal-train-frac", type=float, default=0.70)
     parser.add_argument("--temporal-val-frac", type=float, default=0.15)
+    parser.add_argument("--pointwise-spans", type=int, nargs="+", default=[1])
     parser.add_argument("--fno-spans", type=int, nargs="+", default=[1])
     parser.add_argument("--fno-flow-spans", type=int, nargs="+", default=[1, 2])
     parser.add_argument("--consistency-weight", type=float, default=0.01)
@@ -87,7 +91,7 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--temporal-val-frac must be in [0, 1)")
     if args.temporal_train_frac + args.temporal_val_frac >= 1.0:
         raise ValueError("temporal train + validation fractions must be < 1")
-    if any(span <= 0 for span in args.fno_spans + args.fno_flow_spans + args.consistency_spans):
+    if any(span <= 0 for span in args.pointwise_spans + args.fno_spans + args.fno_flow_spans + args.consistency_spans):
         raise ValueError("all spans must be positive")
     if args.rollout_horizon <= 0 or any(horizon <= 0 for horizon in args.rollout_horizons):
         raise ValueError("rollout horizons must be positive")

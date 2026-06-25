@@ -23,7 +23,7 @@ from fargo_outputs import ModelResult, speed_ms_per_batch
 
 @dataclass(frozen=True)
 class OperatorMethod:
-    """Training recipe for one v3 FNO variant."""
+    """Training recipe for one v3 trainable operator or baseline."""
 
     name: str
     spans: tuple[int, ...]
@@ -38,6 +38,8 @@ class OperatorMethod:
 def methods_from_args(args) -> list[OperatorMethod]:
     """Translate CLI model names into explicit training recipes."""
     specs = []
+    if "pointwise" in args.models:
+        specs.append(OperatorMethod("pointwise", tuple(args.pointwise_spans), consistency_weight=0.0, seed_offset=5))
     if "fno" in args.models:
         specs.append(OperatorMethod("fno", tuple(args.fno_spans), consistency_weight=0.0, seed_offset=10))
     if "fno_flow" in args.models:
