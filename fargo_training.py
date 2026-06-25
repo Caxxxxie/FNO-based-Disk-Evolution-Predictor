@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from fargo_data import FargoMemmapDataset, make_batch, make_consistency_batch, set_time_span
+from fargo_data import FargoMemmapDataset, make_batch, make_consistency_batch, make_rollout_batch, set_time_span
 from fargo_metrics import evaluate_model
 
 
@@ -28,6 +28,8 @@ class TrainingConfig:
     rel_l2_floor: float
     consistency_weight: float
     consistency_spans: tuple[int, int]
+    rollout_train_weight: float = 0.0
+    rollout_train_horizon: int = 1
     early_stop_patience: int = 0
     early_stop_min_delta: float = 1.0e-4
 
@@ -46,6 +48,8 @@ class TrainingConfig:
             rel_l2_floor=args.rel_l2_floor,
             consistency_weight=args.consistency_weight,
             consistency_spans=tuple(args.consistency_spans),
+            rollout_train_weight=args.rollout_train_weight,
+            rollout_train_horizon=args.rollout_train_horizon,
             early_stop_patience=args.early_stop_patience,
             early_stop_min_delta=args.early_stop_min_delta,
         )
@@ -73,6 +77,10 @@ class TrainingConfig:
             raise ValueError("consistency_weight must be nonnegative")
         if len(self.consistency_spans) != 2 or any(span <= 0 for span in self.consistency_spans):
             raise ValueError("consistency_spans must contain two positive spans")
+        if self.rollout_train_weight < 0.0:
+            raise ValueError("rollout_train_weight must be nonnegative")
+        if self.rollout_train_horizon <= 0:
+            raise ValueError("rollout_train_horizon must be positive")
         if self.early_stop_patience < 0:
             raise ValueError("early_stop_patience must be nonnegative")
         if self.early_stop_min_delta < 0.0:
@@ -133,7 +141,7 @@ def train_operator_model(
     loss_weights_jax = jnp.asarray(loss_weights)
 
     @jax.jit
-    def total_loss(params, batch, consistency_batch):
+    def total_loss(params, batch, consistency_batch, rollout_batch):
         pred = model.apply(params, batch)
         sup = batch_mse(pred, batch["y"], loss_weights_jax)
         consistency = jnp.asarray(0.0, dtype=sup.dtype)
@@ -148,13 +156,29 @@ def train_operator_model(
             consistency = batch_mse(direct, second, loss_weights_jax) + batch_mse(
                 direct, consistency_batch["y"], loss_weights_jax
             )
-        return sup + consistency_weight * consistency, (sup, consistency)
+        rollout = jnp.asarray(0.0, dtype=sup.dtype)
+        if config.rollout_train_weight > 0.0:
+            current = rollout_batch["x0"]
+            losses = []
+            for i in range(config.rollout_train_horizon):
+                step_batch = {
+                    "x": current,
+                    "mu": rollout_batch["mu"],
+                    "t": rollout_batch["t"][:, i, :],
+                    "dt": rollout_batch["dt"][:, i, :],
+                }
+                current = model.apply(params, step_batch)
+                losses.append(batch_mse(current, rollout_batch["targets"][:, i, ...], loss_weights_jax))
+            rollout = sum(losses) / len(losses)
+        return sup + consistency_weight * consistency + config.rollout_train_weight * rollout, (sup, consistency, rollout)
 
     @jax.jit
-    def train_step(params, opt_state, batch, consistency_batch):
-        (loss, (sup, consistency)), grads = jax.value_and_grad(total_loss, has_aux=True)(params, batch, consistency_batch)
+    def train_step(params, opt_state, batch, consistency_batch, rollout_batch):
+        (loss, (sup, consistency, rollout)), grads = jax.value_and_grad(total_loss, has_aux=True)(
+            params, batch, consistency_batch, rollout_batch
+        )
         updates, opt_state = opt.update(grads, opt_state, params)
-        return optax.apply_updates(params, updates), opt_state, loss, sup, consistency
+        return optax.apply_updates(params, updates), opt_state, loss, sup, consistency, rollout
 
     history = []
     best_params = params
@@ -162,13 +186,34 @@ def train_operator_model(
     best_step = 0
     stale = 0
     empty_consistency = make_consistency_batch(ds, rng, train_cases, span_a, span_b, min(config.batch_size, 2), mean, std)
+    empty_rollout = make_rollout_batch(
+        ds,
+        rng,
+        train_cases,
+        config.rollout_train_horizon,
+        min(config.batch_size, 2),
+        mean,
+        std,
+    )
     for step in range(1, config.steps + 1):
         batch = make_batch(ds, rng, train_cases, train_pairs, config.batch_size, mean, std)
         if consistency_weight > 0.0:
             consistency_batch = make_consistency_batch(ds, rng, train_cases, span_a, span_b, config.batch_size, mean, std)
         else:
             consistency_batch = empty_consistency
-        params, opt_state, loss, sup, consistency = train_step(params, opt_state, batch, consistency_batch)
+        if config.rollout_train_weight > 0.0:
+            rollout_batch = make_rollout_batch(
+                ds,
+                rng,
+                train_cases,
+                config.rollout_train_horizon,
+                config.batch_size,
+                mean,
+                std,
+            )
+        else:
+            rollout_batch = empty_rollout
+        params, opt_state, loss, sup, consistency, rollout = train_step(params, opt_state, batch, consistency_batch, rollout_batch)
         if step == 1 or step % config.eval_every == 0 or step == config.steps:
             train_eval = evaluate_model(
                 model, params, ds, train_cases, train_pairs, config, mean, std, loss_weights, max_batches=4
@@ -192,6 +237,7 @@ def train_operator_model(
                     "batch_rmse": float(jnp.sqrt(loss)),
                     "supervised_rmse": float(jnp.sqrt(sup)),
                     "consistency_rmse": float(jnp.sqrt(consistency)) if consistency_weight > 0.0 else 0.0,
+                    "rollout_rmse": float(jnp.sqrt(rollout)) if config.rollout_train_weight > 0.0 else 0.0,
                     "train_rmse": train_eval.rmse,
                     "validation_rmse": val_eval.rmse,
                     "learning_rate": float(schedule(step)),

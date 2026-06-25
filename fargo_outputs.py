@@ -171,6 +171,8 @@ def save_model_checkpoint(
             "fno_flow_spans": list(args.fno_flow_spans),
             "consistency_weight": args.consistency_weight,
             "consistency_spans": list(args.consistency_spans),
+            "rollout_train_weight": args.rollout_train_weight,
+            "rollout_train_horizon": args.rollout_train_horizon,
         },
         "case_splits": {
             "train": np.asarray(ds.train_cases, dtype=np.int32),

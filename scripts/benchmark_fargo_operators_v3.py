@@ -55,6 +55,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fno-flow-spans", type=int, nargs="+", default=[1, 2])
     parser.add_argument("--consistency-weight", type=float, default=0.01)
     parser.add_argument("--consistency-spans", type=int, nargs=2, default=[1, 1], metavar=("SPAN_A", "SPAN_B"))
+    parser.add_argument("--rollout-train-weight", type=float, default=0.0)
+    parser.add_argument("--rollout-train-horizon", type=int, default=1)
     parser.add_argument("--rollout-horizon", type=int, default=8)
     parser.add_argument(
         "--rollout-horizons",
@@ -89,6 +91,10 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("all spans must be positive")
     if args.rollout_horizon <= 0 or any(horizon <= 0 for horizon in args.rollout_horizons):
         raise ValueError("rollout horizons must be positive")
+    if args.rollout_train_weight < 0.0:
+        raise ValueError("--rollout-train-weight must be nonnegative")
+    if args.rollout_train_horizon <= 0:
+        raise ValueError("--rollout-train-horizon must be positive")
     if args.rollout_horizon not in args.rollout_horizons:
         args.rollout_horizons = sorted(set(args.rollout_horizons + [args.rollout_horizon]))
     if args.radial_kernel_size is not None:

@@ -72,10 +72,11 @@ def run_benchmark(args) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     ds = FargoMemmapDataset(args.dataset, args.channels, args.time_input_units, args.dt_units)
     invalid_horizons = [horizon for horizon in args.rollout_horizons if horizon >= ds.n_frames]
-    if args.rollout_horizon >= ds.n_frames or invalid_horizons:
+    if args.rollout_horizon >= ds.n_frames or args.rollout_train_horizon >= ds.n_frames or invalid_horizons:
         raise ValueError(
             f"rollout horizons must be smaller than dataset frame count ({ds.n_frames}); "
-            f"got rollout_horizon={args.rollout_horizon}, rollout_horizons={args.rollout_horizons}"
+            f"got rollout_horizon={args.rollout_horizon}, "
+            f"rollout_train_horizon={args.rollout_train_horizon}, rollout_horizons={args.rollout_horizons}"
         )
     coords = coordinate_grid(ds.r, ds.theta)
     loss_weights = spatial_loss_weights(ds.r, args.loss_weighting)
@@ -160,6 +161,8 @@ def run_benchmark(args) -> None:
             "fno_flow_spans": args.fno_flow_spans,
             "rollout_horizon": args.rollout_horizon,
             "rollout_horizons": args.rollout_horizons,
+            "rollout_train_weight": args.rollout_train_weight,
+            "rollout_train_horizon": args.rollout_train_horizon,
             "save_checkpoints": args.save_checkpoints,
             "temporal_bins": args.temporal_bins,
             "normalization_mean": dict(zip(args.channels, mean.tolist())),

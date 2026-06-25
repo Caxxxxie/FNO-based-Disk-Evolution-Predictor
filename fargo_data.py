@@ -235,6 +235,43 @@ def make_consistency_batch(
     }
 
 
+def make_rollout_batch(
+    ds: FargoMemmapDataset,
+    rng: np.random.Generator,
+    case_ids: np.ndarray,
+    horizon: int,
+    batch_size: int,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> dict[str, jnp.ndarray]:
+    """Sample contiguous one-step rollout targets for autoregressive training."""
+    if horizon <= 0:
+        raise ValueError("rollout horizon must be positive")
+    max_start = ds.n_frames - horizon
+    if max_start <= 0:
+        raise ValueError("Not enough frames for rollout horizon")
+    cases = rng.choice(case_ids, size=batch_size, replace=True).astype(np.int32)
+    starts = rng.integers(0, max_start, size=batch_size, dtype=np.int32)
+    x0 = normalize_state(ds.read_state(cases, starts), mean, std)
+    targets = []
+    t_values = []
+    dt_values = []
+    spans = np.ones(batch_size, dtype=np.int32)
+    for offset in range(horizon):
+        frame_ids = starts + offset + 1
+        targets.append(normalize_state(ds.read_state(cases, frame_ids), mean, std))
+        t, dt = ds.read_time(cases, starts + offset, spans)
+        t_values.append(t)
+        dt_values.append(dt)
+    return {
+        "x0": jnp.asarray(x0),
+        "targets": jnp.asarray(np.stack(targets, axis=1)),
+        "mu": jnp.asarray(ds.read_params(cases)),
+        "t": jnp.asarray(np.stack(t_values, axis=1)),
+        "dt": jnp.asarray(np.stack(dt_values, axis=1)),
+    }
+
+
 def estimate_normalization(
     ds: FargoMemmapDataset,
     rng: np.random.Generator,

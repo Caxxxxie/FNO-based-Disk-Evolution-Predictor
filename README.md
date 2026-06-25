@@ -128,15 +128,16 @@ python scripts/summarize_fargo_metrics.py \
   results/v3_local_ablation_fno_span1_200/metrics.json \
   results/v3_local_ablation_fno_span12_200/metrics.json \
   results/v3_local_ablation_fno_span124_200/metrics.json \
-  results/v3_local_tune_fno_w32d3m16_b2_800_lr8e4/metrics.json
+  results/v3_local_tune_fno_w32d3m16_b2_800_lr8e4/metrics.json \
+  results/v3_local_tune_fno_rollh4_w005_800/metrics.json
 ```
 
 On the current 16-case local v3 dataset, span-1 FNO is the strongest default;
 multi-span training is treated as an extension to validate, not the default. The
 best local tuning run so far uses `--width 32 --depth 3 --modes-theta 16
---batch-size 2 --steps 800 --lr 8e-4`, reducing held-out parameter/time error
-from the persistence baseline's 5.57% to 2.91%, and rollout@8 from 22.74% to
-11.51%.
+--batch-size 2 --steps 800 --lr 8e-4 --rollout-train-weight 0.05
+--rollout-train-horizon 4`, reducing held-out parameter/time error from the
+persistence baseline's 5.57% to 2.85%, and rollout@8 from 22.74% to 11.01%.
 
 On the NCSA Jupyter server, after generating the full v2 dataset under
 `fargo_data_v2/data/fargo_transient_10orbits_128f`, start with a short training
@@ -156,6 +157,8 @@ python scripts/benchmark_fargo_operators_v3.py \
   --eval-every 50 \
   --eval-batches 4 \
   --normalization-samples 256 \
+  --rollout-train-weight 0.05 \
+  --rollout-train-horizon 4 \
   --rollout-horizons 1 2 4 8 \
   --jax-platform gpu
 ```
@@ -179,6 +182,8 @@ python scripts/benchmark_fargo_operators_v3.py \
   --eval-batches 24 \
   --normalization-samples 2048 \
   --fno-spans 1 \
+  --rollout-train-weight 0.05 \
+  --rollout-train-horizon 4 \
   --rollout-horizon 16 \
   --rollout-horizons 1 2 4 8 16 \
   --jax-platform gpu
