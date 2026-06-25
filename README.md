@@ -88,11 +88,12 @@ The main transient implementation is split into root-level modules:
 
 ```text
 fargo_data.py       memory-mapped dataset loading, temporal splits, batches
-fno.py              FNO layers and the time-conditioned disk operator
-fargo_training.py   JAX/Haiku training loop
+fargo_model.py      core time-conditioned disk FNO architecture
+fargo_training.py   training config/result objects and JAX/Haiku training loop
 fargo_metrics.py    RMSE, relative L2, rollout, and semigroup evaluation
 fargo_outputs.py    JSON, checkpoint, and loss-plot helpers
 fargo_benchmark.py  orchestration used by the CLI script
+fno.py              small shared FNO utilities for earlier steady demos
 ```
 
 Generate a larger memmap dataset with `scripts/generate_fargo_data_v2.py`, then

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 
 import jax
@@ -11,6 +12,72 @@ import optax
 
 from fargo_data import FargoMemmapDataset, make_batch, make_consistency_batch, set_time_span
 from fargo_metrics import evaluate_model
+
+
+@dataclass(frozen=True)
+class TrainingConfig:
+    steps: int
+    batch_size: int
+    lr: float
+    grad_clip_norm: float
+    seed: int
+    eval_every: int
+    eval_batches: int
+    rel_l2_floor: float
+    consistency_weight: float
+    consistency_spans: tuple[int, int]
+    early_stop_patience: int = 0
+    early_stop_min_delta: float = 1.0e-4
+
+    @classmethod
+    def from_args(cls, args) -> "TrainingConfig":
+        return cls(
+            steps=args.steps,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            grad_clip_norm=args.grad_clip_norm,
+            seed=args.seed,
+            eval_every=args.eval_every,
+            eval_batches=args.eval_batches,
+            rel_l2_floor=args.rel_l2_floor,
+            consistency_weight=args.consistency_weight,
+            consistency_spans=tuple(args.consistency_spans),
+            early_stop_patience=args.early_stop_patience,
+            early_stop_min_delta=args.early_stop_min_delta,
+        )
+
+    def validate(self) -> None:
+        if self.steps <= 0:
+            raise ValueError("steps must be positive")
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if self.lr <= 0.0:
+            raise ValueError("lr must be positive")
+        if self.grad_clip_norm <= 0.0:
+            raise ValueError("grad_clip_norm must be positive")
+        if self.eval_every <= 0:
+            raise ValueError("eval_every must be positive")
+        if self.eval_batches <= 0:
+            raise ValueError("eval_batches must be positive")
+        if self.rel_l2_floor <= 0.0:
+            raise ValueError("rel_l2_floor must be positive")
+        if self.consistency_weight < 0.0:
+            raise ValueError("consistency_weight must be nonnegative")
+        if len(self.consistency_spans) != 2 or any(span <= 0 for span in self.consistency_spans):
+            raise ValueError("consistency_spans must contain two positive spans")
+        if self.early_stop_patience < 0:
+            raise ValueError("early_stop_patience must be nonnegative")
+        if self.early_stop_min_delta < 0.0:
+            raise ValueError("early_stop_min_delta must be nonnegative")
+
+
+@dataclass
+class TrainingResult:
+    params: object
+    history: list[dict]
+    best_step: int
+    best_validation_rmse: float
+    trained_steps: int
 
 
 def batch_mse(pred, target, weights):
@@ -25,20 +92,21 @@ def train_operator_model(
     val_cases: np.ndarray,
     train_pairs: np.ndarray,
     val_pairs: np.ndarray,
-    args,
+    config: TrainingConfig,
     mean: np.ndarray,
     std: np.ndarray,
     loss_weights: np.ndarray,
     seed_offset: int,
     use_consistency: bool,
-) -> tuple[object, list[dict]]:
-    rng = np.random.default_rng(args.seed + seed_offset)
-    key = jax.random.PRNGKey(args.seed + seed_offset)
-    init_batch = make_batch(ds, rng, train_cases, train_pairs, min(args.batch_size, 2), mean, std)
+) -> TrainingResult:
+    config.validate()
+    rng = np.random.default_rng(config.seed + seed_offset)
+    key = jax.random.PRNGKey(config.seed + seed_offset)
+    init_batch = make_batch(ds, rng, train_cases, train_pairs, min(config.batch_size, 2), mean, std)
     params = model.init(key, init_batch)
-    opt = optax.chain(optax.clip_by_global_norm(args.grad_clip_norm), optax.adam(args.lr))
+    opt = optax.chain(optax.clip_by_global_norm(config.grad_clip_norm), optax.adam(config.lr))
     opt_state = opt.init(params)
-    span_a, span_b = args.consistency_spans
+    span_a, span_b = config.consistency_spans
     loss_weights_jax = jnp.asarray(loss_weights)
 
     @jax.jit
@@ -57,7 +125,7 @@ def train_operator_model(
             consistency = batch_mse(direct, second, loss_weights_jax) + batch_mse(
                 direct, consistency_batch["y"], loss_weights_jax
             )
-        return sup + args.consistency_weight * consistency, (sup, consistency)
+        return sup + config.consistency_weight * consistency, (sup, consistency)
 
     @jax.jit
     def train_step(params, opt_state, batch, consistency_batch):
@@ -70,17 +138,17 @@ def train_operator_model(
     best_val = math.inf
     best_step = 0
     stale = 0
-    empty_consistency = make_consistency_batch(ds, rng, train_cases, span_a, span_b, min(args.batch_size, 2), mean, std)
-    for step in range(1, args.steps + 1):
-        batch = make_batch(ds, rng, train_cases, train_pairs, args.batch_size, mean, std)
+    empty_consistency = make_consistency_batch(ds, rng, train_cases, span_a, span_b, min(config.batch_size, 2), mean, std)
+    for step in range(1, config.steps + 1):
+        batch = make_batch(ds, rng, train_cases, train_pairs, config.batch_size, mean, std)
         if use_consistency:
-            consistency_batch = make_consistency_batch(ds, rng, train_cases, span_a, span_b, args.batch_size, mean, std)
+            consistency_batch = make_consistency_batch(ds, rng, train_cases, span_a, span_b, config.batch_size, mean, std)
         else:
             consistency_batch = empty_consistency
         params, opt_state, loss, sup, consistency = train_step(params, opt_state, batch, consistency_batch)
-        if step == 1 or step % args.eval_every == 0 or step == args.steps:
+        if step == 1 or step % config.eval_every == 0 or step == config.steps:
             train_eval = evaluate_model(
-                model, params, ds, train_cases, train_pairs, args, mean, std, loss_weights, max_batches=4
+                model, params, ds, train_cases, train_pairs, config, mean, std, loss_weights, max_batches=4
             )
             val_eval = evaluate_model(
                 model,
@@ -88,11 +156,11 @@ def train_operator_model(
                 ds,
                 val_cases,
                 val_pairs,
-                args,
+                config,
                 mean,
                 std,
                 loss_weights,
-                max_batches=max(4, args.eval_batches // 2),
+                max_batches=max(4, config.eval_batches // 2),
             )
             val_rmse = val_eval.rmse
             history.append(
@@ -106,15 +174,22 @@ def train_operator_model(
                 }
             )
             print(f"{name} step {step}: train={train_eval.rmse:.5f} val={val_rmse:.5f}")
-            if val_rmse < best_val - args.early_stop_min_delta:
+            if val_rmse < best_val - config.early_stop_min_delta:
                 best_val = val_rmse
                 best_params = params
                 best_step = step
                 stale = 0
             else:
                 stale += 1
-            if args.early_stop_patience and stale >= args.early_stop_patience:
+            if config.early_stop_patience and stale >= config.early_stop_patience:
                 print(f"{name} early stopped at step {step}")
                 break
     history.append({"best_step": best_step, "best_validation_rmse": best_val})
-    return best_params, history
+    trained_steps = max(row.get("step", 0) for row in history)
+    return TrainingResult(
+        params=best_params,
+        history=history,
+        best_step=best_step,
+        best_validation_rmse=best_val,
+        trained_steps=trained_steps,
+    )

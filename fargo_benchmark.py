@@ -29,21 +29,12 @@ from fargo_outputs import (
     summarize_splits,
     to_jsonable,
 )
-from fargo_training import train_operator_model
-from fno import make_time_conditioned_fno
+from fargo_model import FargoFNOConfig, make_fargo_fno
+from fargo_training import TrainingConfig, train_operator_model
 
 
 def make_operator_model(args, coords, output_channels: int):
-    return make_time_conditioned_fno(
-        coords,
-        args.width,
-        args.modes_theta,
-        args.depth,
-        output_channels,
-        radial_kernels=args.radial_kernels,
-        radial_dilations=args.radial_dilations,
-        radial_padding=args.radial_padding,
-    )
+    return make_fargo_fno(coords, FargoFNOConfig.from_args(args, output_channels))
 
 
 def run_model(
@@ -61,8 +52,9 @@ def run_model(
     seed_offset,
 ):
     model = make_operator_model(args, coords, ds.n_channels)
+    train_config = TrainingConfig.from_args(args)
     use_consistency = name == "fno_flow" and args.consistency_weight > 0.0
-    params, history = train_operator_model(
+    training_result = train_operator_model(
         name,
         model,
         ds,
@@ -70,13 +62,15 @@ def run_model(
         val_cases if val_cases.size else train_cases,
         pair_splits["train"],
         pair_splits["validation"] if pair_splits["validation"].shape[0] else pair_splits["train"],
-        args,
+        train_config,
         mean,
         std,
         loss_weights,
         seed_offset,
         use_consistency,
     )
+    params = training_result.params
+    history = training_result.history
     if args.save_checkpoints:
         checkpoint_path = save_model_checkpoint(args.output_dir, name, params, ds, args, mean, std, pair_splits)
         print(f"Saved {name} checkpoint to {checkpoint_path}")
@@ -112,7 +106,6 @@ def run_model(
             std,
             loss_weights,
         )
-    best = next((row for row in reversed(history) if "best_step" in row), {})
     result = ModelResult(
         train=evaluate_model(model, params, ds, train_cases, pair_splits["train"], args, mean, std, loss_weights),
         validation=evaluate_model(
@@ -151,9 +144,9 @@ def run_model(
         ),
         rollout=rollout,
         speed_ms_per_batch=speed_ms_per_batch(model, params, speed_batch, args.speed_repeats),
-        trained_steps=max([row.get("step", 0) for row in history]),
-        best_step=best.get("best_step"),
-        best_validation_rmse=best.get("best_validation_rmse"),
+        trained_steps=training_result.trained_steps,
+        best_step=training_result.best_step,
+        best_validation_rmse=training_result.best_validation_rmse,
         semigroup_rmse=sg,
         semigroup_rmse_by_channel=sg_ch,
     )
@@ -326,4 +319,3 @@ def run_benchmark(args) -> None:
     if args.save_loss_plots:
         save_loss_plot(history_by_model, args.output_dir)
     print(f"Saved benchmark outputs to {args.output_dir}")
-
