@@ -121,6 +121,18 @@ Summarize a finished run:
 python scripts/summarize_fargo_metrics.py results/fargo_operator_benchmark_v3/metrics.json
 ```
 
+For local tuning, compare small FNO variants with the same dataset/capacity:
+
+```bash
+python scripts/summarize_fargo_metrics.py \
+  results/v3_local_ablation_fno_span1_200/metrics.json \
+  results/v3_local_ablation_fno_span12_200/metrics.json \
+  results/v3_local_ablation_fno_span124_200/metrics.json
+```
+
+On the current 16-case local v3 dataset, span-1 FNO is the strongest default;
+multi-span training is treated as an extension to validate, not the default.
+
 On the NCSA Jupyter server, after generating the full v2 dataset under
 `fargo_data_v2/data/fargo_transient_10orbits_128f`, start with a short training
 smoke test:
