@@ -40,7 +40,7 @@ Use a short dataset name because FARGO3D has fixed-size internal path buffers on
 some systems.
 
 ```bash
-.venv/bin/python scripts/generate_fargo_dataset.py \
+.venv/bin/python scripts/generate_fargo_dataset_v1.py \
   --dataset-name poc12 \
   --skip-build \
   --num-random-cases 8 \
@@ -81,3 +81,28 @@ pretrained PPDONet checkpoints as a steady time-independent baseline. It then
 trains the selected one-step models on the requested channels. The FNO variant
 is the main proof-of-concept model; the state-conditioned DeepONet and pointwise
 residual model are sanity baselines.
+
+## Run The Larger FARGO Operator Benchmark
+
+The main transient implementation is split into root-level modules:
+
+```text
+fargo_data.py       memory-mapped dataset loading, temporal splits, batches
+fno.py              FNO layers and the time-conditioned disk operator
+fargo_training.py   JAX/Haiku training loop
+fargo_metrics.py    RMSE, relative L2, rollout, and semigroup evaluation
+fargo_outputs.py    JSON, checkpoint, and loss-plot helpers
+fargo_benchmark.py  orchestration used by the CLI script
+```
+
+Generate a larger memmap dataset with `scripts/generate_fargo_data_v2.py`, then
+run:
+
+```bash
+.venv/bin/python scripts/benchmark_fargo_operators_v3.py \
+  --dataset data/fargo_transient_10orbits_128f \
+  --models fno fno_flow \
+  --steps 5000 \
+  --batch-size 8 \
+  --output-dir results/fargo_operator_benchmark_v3
+```

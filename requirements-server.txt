@@ -1,0 +1,17 @@
+# Flexible server environment for Jupyter/HPC runs.
+# Prefer Python 3.10 or 3.11; this list avoids old pins that fail on newer pip.
+numpy
+jax[cpu]
+dm-haiku
+optax
+chex
+pandas
+PyYAML>=6.0.2
+xarray
+netCDF4
+tqdm
+matplotlib
+scipy
+scikit-learn
+scikit-image
+astropy

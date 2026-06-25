@@ -9,6 +9,7 @@ __pycache__/
 data/
 results/
 documents/
+outputs/
 
 # LaTeX/editor build products.
 *.aux

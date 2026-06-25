@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the Benchmark v1 FARGO3D time-dependent disk dataset.
 
-This is the larger counterpart to ``generate_fargo_dataset.py``.  It keeps the
+This is the larger counterpart to ``generate_fargo_dataset_v1.py``.  It keeps the
 same FARGO3D packing workflow, but uses the PPDONet parameter domain and Sobol
 sampling in normalized parameter space.
 """

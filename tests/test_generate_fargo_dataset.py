@@ -1,7 +1,7 @@
 import argparse
 import unittest
 
-from scripts.generate_fargo_dataset import (
+from scripts.generate_fargo_dataset_v1 import (
     ASPECT_RATIO_MAX,
     ASPECT_RATIO_MIN,
     SMOKE_CASES,
