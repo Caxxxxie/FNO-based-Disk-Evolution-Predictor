@@ -124,8 +124,13 @@ def run(cmd: list[str], cwd: Path) -> None:
 
 def build_fargo(args: argparse.Namespace) -> None:
     exe = fargo_executable()
-    if args.skip_build and exe.exists():
-        return
+    if args.skip_build:
+        if exe.exists():
+            return
+        raise FileNotFoundError(
+            f"--skip-build was set, but the FARGO3D executable does not exist: {exe}. "
+            "Build FARGO3D first or rerun without --skip-build."
+        )
     gpu = "0" if args.cpu else "1"
     parallel = "1" if args.parallel else "0"
     run(["make", "SETUP=fargo_nu", f"PARALLEL={parallel}", f"GPU={gpu}"], cwd=FARGO_ROOT)

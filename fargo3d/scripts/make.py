@@ -2,6 +2,7 @@ from __future__ import print_function
 import re
 import sys
 import os
+import subprocess
 
 """
 Warning: Do not forget to include all the new flags in the .defaulflags file.
@@ -19,6 +20,11 @@ SCRIPTSDIR = "../scripts/"
 SRCDIR     = "../src/"
 
 PYTHON_CMD = "python" + sys.version[0] + " "
+
+def run_command(command, **kwargs):
+    status = subprocess.call(command, shell=True, **kwargs)
+    if status != 0:
+        sys.exit(status)
 
 def get_defaults(filename=STDDIR+"defaultflags"):
     params = {}
@@ -90,13 +96,13 @@ def write_last(parameters):
 def clean_check(parameters, makeline):
     for param in parameters:
         if re.match("clean",param):
-            os.system(makeline + "-s clean")
+            run_command(makeline + "-s clean")
             exit()
 
 def mrproper_check(parameters, makeline):
     for param in parameters:
         if re.match("mrproper",param):
-            os.system(makeline + "-s mrproper")
+            run_command(makeline + "-s mrproper")
             exit()
 
 def jobs_check(parameters):
@@ -166,20 +172,21 @@ write_last(final_params)
 nfluid_check(final_params)
 
 if not build_is_fresh(base,final_params):
-    os.system(make + "clean")
+    run_command(make + "clean")
 
 line = make + "var.c "
 for key in final_params.keys():
     line += key + "=" + final_params[key] + " "
-os.system(line+">.tmp")
+with open(".tmp", "w") as tmp:
+    run_command(line, stdout=tmp)
 
-os.system(PYTHON_CMD + SCRIPTSDIR +"param.py")
-os.system(PYTHON_CMD + SCRIPTSDIR +"global.py")
+run_command(PYTHON_CMD + SCRIPTSDIR +"param.py")
+run_command(PYTHON_CMD + SCRIPTSDIR +"global.py")
 
 line = make + " rescale.c "
 for key in final_params.keys():
     line += key + "=" + final_params[key] + " "
-os.system(line)
+run_command(line)
 
 line = make + " -j{0:d} ".format(njobs)
 for key in final_params.keys():
@@ -187,4 +194,4 @@ for key in final_params.keys():
 
 line += " allp"
 
-os.system(line)
+run_command(line)

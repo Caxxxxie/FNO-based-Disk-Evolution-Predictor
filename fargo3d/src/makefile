@@ -119,6 +119,13 @@ else
 CUDA = /usr/local/cuda
 endif # select cuda path
 endif # ifndef CUDA
+ifndef CUDA_LIB
+ifneq ($(wildcard ${CUDA}/lib64),)
+CUDA_LIB = ${CUDA}/lib64
+else
+CUDA_LIB = ${CUDA}/lib
+endif
+endif
 # Python include
 ifndef PYTHON_INCLUDE
 PYTHON_INCLUDE = /usr/include/python3.8
@@ -137,7 +144,7 @@ CUDAOPT_LINUX = -O3 -w #-arch=sm_XX # try utils/cuda/get_cuda_sm.sh
 PARAINC_LINUX = 
 PARALIB_LINUX =
 CUDAINC_LINUX = -I${CUDA}/include/
-CUDALIB_LINUX = -L${CUDA}/lib64/  -lcudart -lstdc++
+CUDALIB_LINUX = -L${CUDA_LIB}/  -lcudart -lstdc++
 CXX_LINUX     = g++ -stdlib=libstdc++
 CXXPARA_LINUX = mpic++ -stdlib=libstdc++
 #---------------------------------------------------------------------
