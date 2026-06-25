@@ -24,7 +24,7 @@ def metric_value(result: dict, split: str, key: str = "rel_l2_pct") -> float | N
 
 
 def rollout_value(result: dict, horizon: str, key: str = "rel_l2_pct") -> float | None:
-    by_horizon = result.get("rollout_by_horizon")
+    by_horizon = result.get("rollout_by_horizon") or result.get("rollouts")
     if not isinstance(by_horizon, dict) or horizon not in by_horizon:
         return None
     raw = by_horizon[horizon].get(key)
@@ -40,7 +40,7 @@ def choose_horizon(results: dict, requested: str | None) -> str:
         return str(requested)
     horizons = set()
     for result in results.values():
-        by_horizon = result.get("rollout_by_horizon")
+        by_horizon = result.get("rollout_by_horizon") or result.get("rollouts")
         if isinstance(by_horizon, dict):
             horizons.update(by_horizon.keys())
     if not horizons:
