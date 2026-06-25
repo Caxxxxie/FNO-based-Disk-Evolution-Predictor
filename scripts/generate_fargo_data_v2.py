@@ -29,6 +29,7 @@ PARAMETER_NAMES_PPDONET = ["ALPHA", "ASPECTRATIO", "PLANETMASS"]
 U_MIN = np.asarray([-3.52, 0.05, -4.3], dtype=np.float64)
 U_MAX = np.asarray([-1.0, 0.10, -2.7], dtype=np.float64)
 U_TRANSFORM = ["log10", "", "log10"]
+MEMMAP_CHANNELS = ["log_sigma", "delta_v_r", "delta_v_theta", "v_r", "v_theta"]
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-run", action="store_true")
     parser.add_argument("--keep-raw", action="store_true")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reuse an existing partial dataset and continue from unpacked cases.",
+    )
     parser.add_argument("--pack-npz", action="store_true", help="Also write dataset.npz. Expensive for benchmark size.")
     parser.add_argument("--cpu", action="store_true", help="Build/run CPU FARGO3D instead of GPU.")
     parser.add_argument("--parallel", action="store_true", help="Build FARGO3D with PARALLEL=1.")
@@ -364,17 +370,114 @@ def read_case(output_dir: Path, case: FargoCase, args: argparse.Namespace, timin
     }
 
 
-def create_memmaps(dataset_dir: Path, shape: tuple[int, int, int, int]) -> dict[str, np.memmap]:
+def create_memmaps(dataset_dir: Path, shape: tuple[int, int, int, int], resume: bool = False) -> dict[str, np.memmap]:
     arrays = {}
-    for name in ["log_sigma", "delta_v_r", "delta_v_theta", "v_r", "v_theta"]:
+    existing_paths = [dataset_dir / f"{name}.npy" for name in MEMMAP_CHANNELS if (dataset_dir / f"{name}.npy").exists()]
+    if resume and existing_paths and len(existing_paths) != len(MEMMAP_CHANNELS):
+        existing = ", ".join(path.name for path in existing_paths)
+        raise ValueError(f"Cannot resume with incomplete memmap set. Existing files: {existing}")
+    for name in MEMMAP_CHANNELS:
         path = dataset_dir / f"{name}.npy"
-        arrays[name] = np.lib.format.open_memmap(path, mode="w+", dtype=np.float32, shape=shape)
+        if resume and path.exists():
+            array = np.lib.format.open_memmap(path, mode="r+")
+            if array.shape != shape:
+                raise ValueError(f"Existing {path} has shape {array.shape}, expected {shape}")
+            if array.dtype != np.float32:
+                raise ValueError(f"Existing {path} has dtype {array.dtype}, expected float32")
+            arrays[name] = array
+        else:
+            arrays[name] = np.lib.format.open_memmap(path, mode="w+", dtype=np.float32, shape=shape)
     return arrays
 
 
 def flush_memmaps(arrays: dict[str, np.memmap]) -> None:
     for array in arrays.values():
         array.flush()
+
+
+def load_or_empty(path: Path, shape: tuple[int, ...], dtype=np.float32) -> np.ndarray:
+    if path.exists():
+        values = np.load(path, allow_pickle=False)
+        if values.shape != shape:
+            raise ValueError(f"Existing {path} has shape {values.shape}, expected {shape}")
+        return np.asarray(values, dtype=dtype)
+    return np.empty(shape, dtype=dtype)
+
+
+def save_auxiliary_arrays(
+    dataset_dir: Path,
+    times: np.ndarray,
+    t_norm: np.ndarray,
+    background_v_r: np.ndarray,
+    background_v_theta: np.ndarray,
+) -> None:
+    np.save(dataset_dir / "times.npy", times)
+    np.save(dataset_dir / "t_norm.npy", t_norm)
+    np.save(dataset_dir / "v_r_background.npy", background_v_r)
+    np.save(dataset_dir / "v_theta_background.npy", background_v_theta)
+
+
+def validate_existing_scaffold(
+    dataset_dir: Path,
+    params: np.ndarray,
+    params_norm: np.ndarray,
+    case_split: np.ndarray,
+) -> None:
+    expected = {
+        "params.npy": params,
+        "params_norm.npy": params_norm,
+        "case_split.npy": case_split,
+    }
+    for filename, values in expected.items():
+        path = dataset_dir / filename
+        if not path.exists():
+            continue
+        existing = np.load(path, allow_pickle=False)
+        if existing.shape != values.shape or not np.array_equal(existing, values):
+            raise ValueError(f"Existing {path} does not match the requested dataset configuration")
+
+
+def infer_completed_cases(dataset_dir: Path, shape: tuple[int, int, int, int]) -> np.ndarray:
+    """Infer packed rows from existing memmap data and progress markers."""
+    completed = np.zeros(shape[0], dtype=bool)
+    log_sigma_path = dataset_dir / "log_sigma.npy"
+    if log_sigma_path.exists():
+        log_sigma = np.lib.format.open_memmap(log_sigma_path, mode="r")
+        if log_sigma.shape != shape:
+            raise ValueError(f"Existing {log_sigma_path} has shape {log_sigma.shape}, expected {shape}")
+        y_stride = max(1, shape[2] // 8)
+        x_stride = max(1, shape[3] // 16)
+        for i in range(shape[0]):
+            sample = np.asarray(log_sigma[i, :, ::y_stride, ::x_stride])
+            completed[i] = bool(np.all(np.isfinite(sample)) and np.any(np.abs(sample) > 1.0e-12))
+
+    progress_path = dataset_dir / "progress.jsonl"
+    if progress_path.exists():
+        for line in progress_path.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("event") == "packed":
+                case_index = int(event["case_index"])
+                if 0 <= case_index < shape[0]:
+                    completed[case_index] = True
+    return completed
+
+
+def mark_case_complete(dataset_dir: Path, case_index: int, case_name: str) -> None:
+    progress_path = dataset_dir / "progress.jsonl"
+    with progress_path.open("a") as f:
+        f.write(json.dumps({"event": "packed", "case_index": case_index, "case_name": case_name}) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def frame_time_arrays(frame_numbers: np.ndarray, timing: dict) -> tuple[np.ndarray, np.ndarray]:
+    times = (np.asarray(frame_numbers, dtype=np.float64) * timing["dt"] * timing["ninterm"]).astype(np.float32)
+    return times, (times / timing["total_time"]).astype(np.float32)
 
 
 def main() -> None:
@@ -394,17 +497,34 @@ def main() -> None:
     params = np.asarray([[c.alpha, c.aspect_ratio, c.planet_mass] for c in cases], dtype=np.float32)
     params_norm = np.asarray([[c.u0, c.u1, c.u2] for c in cases], dtype=np.float32)
     case_split = np.asarray([c.split for c in cases])
+    if args.resume:
+        validate_existing_scaffold(dataset_dir, params, params_norm, case_split)
     np.save(dataset_dir / "params.npy", params)
     np.save(dataset_dir / "params_norm.npy", params_norm)
     np.save(dataset_dir / "case_split.npy", case_split)
 
-    memmaps = None
-    r = theta = frames = None
-    times = np.empty((args.cases, args.frames), dtype=np.float32)
-    t_norm = np.empty((args.cases, args.frames), dtype=np.float32)
+    shape = (args.cases, args.frames, args.ny, args.nx)
+    memmaps = None if args.dry_run else create_memmaps(dataset_dir, shape, resume=args.resume)
+    completed_cases = np.zeros(args.cases, dtype=bool) if args.dry_run else infer_completed_cases(dataset_dir, shape)
+    if args.resume and completed_cases.any():
+        last_done = int(np.flatnonzero(completed_cases)[-1])
+        print(f"Resume detected {int(completed_cases.sum())} packed cases; last detected case_{last_done:03d}")
+    r = np.load(dataset_dir / "r.npy") if args.resume and (dataset_dir / "r.npy").exists() else None
+    theta = np.load(dataset_dir / "theta.npy") if args.resume and (dataset_dir / "theta.npy").exists() else None
+    frames = np.load(dataset_dir / "frames.npy") if args.resume and (dataset_dir / "frames.npy").exists() else None
+    times = load_or_empty(dataset_dir / "times.npy", (args.cases, args.frames)) if args.resume else np.empty((args.cases, args.frames), dtype=np.float32)
+    t_norm = load_or_empty(dataset_dir / "t_norm.npy", (args.cases, args.frames)) if args.resume else np.empty((args.cases, args.frames), dtype=np.float32)
     timing_by_case = []
-    background_v_r = np.empty((args.cases, args.ny), dtype=np.float32)
-    background_v_theta = np.empty((args.cases, args.ny), dtype=np.float32)
+    background_v_r = (
+        load_or_empty(dataset_dir / "v_r_background.npy", (args.cases, args.ny))
+        if args.resume
+        else np.empty((args.cases, args.ny), dtype=np.float32)
+    )
+    background_v_theta = (
+        load_or_empty(dataset_dir / "v_theta_background.npy", (args.cases, args.ny))
+        if args.resume
+        else np.empty((args.cases, args.ny), dtype=np.float32)
+    )
 
     for i, case in enumerate(cases):
         case_name = f"case_{i:03d}"
@@ -414,6 +534,21 @@ def main() -> None:
         write_planet_config(planet_cfg, case.planet_mass)
         timing = write_par_file(par_file, output_dir, planet_cfg, case, args)
         timing_by_case.append(timing)
+
+        if completed_cases[i] and not args.dry_run:
+            if r is None:
+                raise ValueError(f"Cannot resume {case_name}: r.npy is missing")
+            if frames is None:
+                frames = np.arange(args.frames, dtype=np.int32)
+                np.save(dataset_dir / "frames.npy", frames)
+            case_times, case_t_norm = frame_time_arrays(frames, timing)
+            times[i] = case_times
+            t_norm[i] = case_t_norm
+            background_v_r[i], background_v_theta[i] = initial_velocity_background(r, case, args)
+            if output_dir.exists() and not (args.keep_raw or args.skip_run):
+                shutil.rmtree(output_dir)
+            print(f"Skipping {case_name}: already packed")
+            continue
 
         if output_dir.exists() and not (args.skip_run or args.dry_run):
             shutil.rmtree(output_dir)
@@ -427,15 +562,18 @@ def main() -> None:
             continue
 
         data = read_case(output_dir, case, args, timing)
-        if memmaps is None:
-            shape = (args.cases, args.frames, args.ny, args.nx)
-            memmaps = create_memmaps(dataset_dir, shape)
+        if r is None:
             r = data["r"]
             theta = data["theta"]
             frames = data["frames"]
             np.save(dataset_dir / "r.npy", r)
             np.save(dataset_dir / "theta.npy", theta)
             np.save(dataset_dir / "frames.npy", frames)
+        else:
+            if theta is None or frames is None:
+                raise ValueError("Resume grid metadata is incomplete")
+            if not (np.allclose(r, data["r"]) and np.allclose(theta, data["theta"]) and np.array_equal(frames, data["frames"])):
+                raise ValueError(f"Grid metadata for {case_name} does not match the existing dataset")
 
         for name, array in memmaps.items():
             array[i] = data[name]
@@ -446,14 +584,14 @@ def main() -> None:
 
         if not args.keep_raw:
             shutil.rmtree(output_dir)
+        flush_memmaps(memmaps)
+        save_auxiliary_arrays(dataset_dir, times, t_norm, background_v_r, background_v_theta)
+        mark_case_complete(dataset_dir, i, case_name)
         print(f"Packed {case_name}: split={case.split}, total_time={timing['total_time']:.6e}")
 
     if memmaps is not None:
         flush_memmaps(memmaps)
-        np.save(dataset_dir / "times.npy", times)
-        np.save(dataset_dir / "t_norm.npy", t_norm)
-        np.save(dataset_dir / "v_r_background.npy", background_v_r)
-        np.save(dataset_dir / "v_theta_background.npy", background_v_theta)
+        save_auxiliary_arrays(dataset_dir, times, t_norm, background_v_r, background_v_theta)
 
     time_meta = {
         "scale": args.time_scale,
