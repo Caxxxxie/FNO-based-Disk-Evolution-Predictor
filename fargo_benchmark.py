@@ -15,10 +15,14 @@ from fargo_data import (
     split_temporal_pairs,
 )
 from fargo_metrics import (
+    evaluate_model_by_span,
     evaluate_model,
     evaluate_persistence,
+    evaluate_persistence_by_span,
     evaluate_persistence_rollout,
+    evaluate_persistence_rollouts,
     evaluate_rollout,
+    evaluate_rollouts,
     evaluate_semigroup,
 )
 from fargo_outputs import (
@@ -94,6 +98,17 @@ def run_model(
         loss_weights,
         args.rollout_horizon,
     )
+    rollout_by_horizon = evaluate_rollouts(
+        model,
+        params,
+        ds,
+        test_cases if test_cases.size else train_cases,
+        args,
+        mean,
+        std,
+        loss_weights,
+        args.rollout_horizons,
+    )
     sg = sg_ch = None
     if name == "fno_flow":
         sg, sg_ch = evaluate_semigroup(
@@ -143,6 +158,18 @@ def run_model(
             loss_weights,
         ),
         rollout=rollout,
+        heldout_parameter_time_by_span=evaluate_model_by_span(
+            model,
+            params,
+            ds,
+            test_cases if test_cases.size else val_cases,
+            pair_splits["test"],
+            args,
+            mean,
+            std,
+            loss_weights,
+        ),
+        rollout_by_horizon=rollout_by_horizon,
         speed_ms_per_batch=speed_ms_per_batch(model, params, speed_batch, args.speed_repeats),
         trained_steps=training_result.trained_steps,
         best_step=training_result.best_step,
@@ -156,6 +183,12 @@ def run_model(
 def run_benchmark(args) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     ds = FargoMemmapDataset(args.dataset, args.channels, args.time_input_units, args.dt_units)
+    invalid_horizons = [horizon for horizon in args.rollout_horizons if horizon >= ds.n_frames]
+    if args.rollout_horizon >= ds.n_frames or invalid_horizons:
+        raise ValueError(
+            f"rollout horizons must be smaller than dataset frame count ({ds.n_frames}); "
+            f"got rollout_horizon={args.rollout_horizon}, rollout_horizons={args.rollout_horizons}"
+        )
     coords = coordinate_grid(ds.r, ds.theta)
     loss_weights = spatial_loss_weights(ds.r, args.loss_weighting)
     print(f"Loaded {args.dataset}: cases={ds.n_cases}, frames={ds.n_frames}, grid={ds.ny}x{ds.nx}, channels={args.channels}")
@@ -191,8 +224,18 @@ def run_benchmark(args) -> None:
         loss_weights,
         args.rollout_horizon,
     )
+    persistence_rollout_by_horizon = evaluate_persistence_rollouts(
+        ds,
+        ds.test_cases if ds.test_cases.size else ds.train_cases,
+        args,
+        mean,
+        std,
+        loss_weights,
+        args.rollout_horizons,
+    )
     results = {
         "persistence_rollout": to_jsonable(persistence_rollout),
+        "persistence_rollout_by_horizon": to_jsonable(persistence_rollout_by_horizon),
         "persistence_fno_spans": to_jsonable(
             ModelResult(
                 train=evaluate_persistence(ds, ds.train_cases, fno_pair_splits["train"], args, mean, std, loss_weights),
@@ -211,6 +254,10 @@ def run_benchmark(args) -> None:
                     ds, ds.test_cases, fno_pair_splits["test"], args, mean, std, loss_weights
                 ),
                 rollout=persistence_rollout,
+                heldout_parameter_time_by_span=evaluate_persistence_by_span(
+                    ds, ds.test_cases, fno_pair_splits["test"], args, mean, std, loss_weights
+                ),
+                rollout_by_horizon=persistence_rollout_by_horizon,
                 speed_ms_per_batch=None,
             )
         ),
@@ -236,6 +283,10 @@ def run_benchmark(args) -> None:
                     ds, ds.test_cases, fno_flow_pair_splits["test"], args, mean, std, loss_weights
                 ),
                 rollout=persistence_rollout,
+                heldout_parameter_time_by_span=evaluate_persistence_by_span(
+                    ds, ds.test_cases, fno_flow_pair_splits["test"], args, mean, std, loss_weights
+                ),
+                rollout_by_horizon=persistence_rollout_by_horizon,
                 speed_ms_per_batch=None,
             )
         ),
@@ -284,6 +335,9 @@ def run_benchmark(args) -> None:
             "models": args.models,
             "steps": args.steps,
             "batch_size": args.batch_size,
+            "lr": args.lr,
+            "warmup_steps": args.warmup_steps,
+            "min_lr_ratio": args.min_lr_ratio,
             "width": args.width,
             "depth": args.depth,
             "modes_r": args.modes_r,
@@ -299,6 +353,7 @@ def run_benchmark(args) -> None:
             "fno_spans": args.fno_spans,
             "fno_flow_spans": args.fno_flow_spans,
             "rollout_horizon": args.rollout_horizon,
+            "rollout_horizons": args.rollout_horizons,
             "save_checkpoints": args.save_checkpoints,
             "temporal_bins": args.temporal_bins,
             "normalization_mean": dict(zip(args.channels, mean.tolist())),

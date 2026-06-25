@@ -107,3 +107,55 @@ run:
   --batch-size 8 \
   --output-dir results/fargo_operator_benchmark_v3
 ```
+
+On the NCSA Jupyter server, after generating the full v2 dataset under
+`fargo_data_v2/data/fargo_transient_10orbits_128f`, start with a short training
+smoke test:
+
+```bash
+python scripts/benchmark_fargo_operators_v3.py \
+  --dataset fargo_data_v2/data/fargo_transient_10orbits_128f \
+  --output-dir results/server_v3_smoke \
+  --models fno_flow \
+  --steps 200 \
+  --batch-size 4 \
+  --width 32 \
+  --depth 3 \
+  --modes-theta 16 \
+  --eval-every 50 \
+  --eval-batches 4 \
+  --normalization-samples 256 \
+  --fno-flow-spans 1 2 4 \
+  --rollout-horizons 1 2 4 8 \
+  --jax-platform gpu
+```
+
+For a longer run, increase capacity and steps:
+
+```bash
+python scripts/benchmark_fargo_operators_v3.py \
+  --dataset fargo_data_v2/data/fargo_transient_10orbits_128f \
+  --output-dir results/server_v3_fno_flow_w64_d4 \
+  --models fno_flow \
+  --steps 12000 \
+  --batch-size 8 \
+  --width 64 \
+  --depth 4 \
+  --modes-theta 32 \
+  --lr 8e-4 \
+  --warmup-steps 500 \
+  --min-lr-ratio 0.05 \
+  --eval-every 250 \
+  --eval-batches 24 \
+  --normalization-samples 2048 \
+  --fno-flow-spans 1 2 4 8 \
+  --consistency-weight 0.02 \
+  --consistency-spans 2 2 \
+  --rollout-horizon 16 \
+  --rollout-horizons 1 2 4 8 16 \
+  --jax-platform gpu
+```
+
+The v3 metrics include persistence baselines, held-out parameter/time errors,
+per-channel RMSE/relative L2, per-span errors, rollout errors at multiple
+horizons, and the semigroup consistency error for `fno_flow`.

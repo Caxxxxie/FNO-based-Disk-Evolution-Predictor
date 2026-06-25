@@ -20,6 +20,8 @@ class TrainingConfig:
     batch_size: int
     lr: float
     grad_clip_norm: float
+    warmup_steps: int
+    min_lr_ratio: float
     seed: int
     eval_every: int
     eval_batches: int
@@ -36,6 +38,8 @@ class TrainingConfig:
             batch_size=args.batch_size,
             lr=args.lr,
             grad_clip_norm=args.grad_clip_norm,
+            warmup_steps=args.warmup_steps,
+            min_lr_ratio=args.min_lr_ratio,
             seed=args.seed,
             eval_every=args.eval_every,
             eval_batches=args.eval_batches,
@@ -55,6 +59,10 @@ class TrainingConfig:
             raise ValueError("lr must be positive")
         if self.grad_clip_norm <= 0.0:
             raise ValueError("grad_clip_norm must be positive")
+        if self.warmup_steps < 0:
+            raise ValueError("warmup_steps must be nonnegative")
+        if not (0.0 <= self.min_lr_ratio <= 1.0):
+            raise ValueError("min_lr_ratio must be in [0, 1]")
         if self.eval_every <= 0:
             raise ValueError("eval_every must be positive")
         if self.eval_batches <= 0:
@@ -104,7 +112,22 @@ def train_operator_model(
     key = jax.random.PRNGKey(config.seed + seed_offset)
     init_batch = make_batch(ds, rng, train_cases, train_pairs, min(config.batch_size, 2), mean, std)
     params = model.init(key, init_batch)
-    opt = optax.chain(optax.clip_by_global_norm(config.grad_clip_norm), optax.adam(config.lr))
+    warmup_steps = min(config.warmup_steps, max(0, config.steps - 1))
+    if warmup_steps > 0:
+        schedule = optax.warmup_cosine_decay_schedule(
+            init_value=0.0,
+            peak_value=config.lr,
+            warmup_steps=warmup_steps,
+            decay_steps=config.steps,
+            end_value=config.lr * config.min_lr_ratio,
+        )
+    else:
+        schedule = optax.cosine_decay_schedule(
+            init_value=config.lr,
+            decay_steps=config.steps,
+            alpha=config.min_lr_ratio,
+        )
+    opt = optax.chain(optax.clip_by_global_norm(config.grad_clip_norm), optax.adam(schedule))
     opt_state = opt.init(params)
     span_a, span_b = config.consistency_spans
     loss_weights_jax = jnp.asarray(loss_weights)
@@ -171,6 +194,7 @@ def train_operator_model(
                     "consistency_rmse": float(jnp.sqrt(consistency)) if use_consistency else 0.0,
                     "train_rmse": train_eval.rmse,
                     "validation_rmse": val_eval.rmse,
+                    "learning_rate": float(schedule(step)),
                 }
             )
             print(f"{name} step {step}: train={train_eval.rmse:.5f} val={val_rmse:.5f}")

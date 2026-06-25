@@ -26,6 +26,8 @@ class ModelResult:
     trained_steps: int | None = None
     best_step: int | None = None
     best_validation_rmse: float | None = None
+    heldout_parameter_time_by_span: dict[str, EvalMetrics] | None = None
+    rollout_by_horizon: dict[str, EvalMetrics] | None = None
     semigroup_rmse: float | None = None
     semigroup_rmse_by_channel: dict[str, float] | None = None
 
@@ -157,6 +159,8 @@ def save_model_checkpoint(
             "batch_size": args.batch_size,
             "learning_rate": args.lr,
             "grad_clip_norm": args.grad_clip_norm,
+            "warmup_steps": args.warmup_steps,
+            "min_lr_ratio": args.min_lr_ratio,
             "seed": args.seed,
             "loss_weighting": args.loss_weighting,
             "temporal_bins": args.temporal_bins,

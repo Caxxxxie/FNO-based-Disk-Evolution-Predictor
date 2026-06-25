@@ -146,6 +146,28 @@ def evaluate_persistence(ds, case_ids, pair_rows, args, mean, std, loss_weights,
     return _finalize_accumulator(acc, ds, batches, args.rel_l2_floor)
 
 
+def evaluate_model_by_span(model, params, ds, case_ids, pair_rows, args, mean, std, loss_weights) -> dict[str, EvalMetrics]:
+    """Evaluate an operator separately for each temporal span in ``pair_rows``."""
+    metrics = {}
+    for span in sorted(set(int(row[1]) for row in pair_rows)):
+        rows = pair_rows[pair_rows[:, 1] == span]
+        if rows.shape[0] == 0:
+            continue
+        metrics[str(span)] = evaluate_model(model, params, ds, case_ids, rows, args, mean, std, loss_weights)
+    return metrics
+
+
+def evaluate_persistence_by_span(ds, case_ids, pair_rows, args, mean, std, loss_weights) -> dict[str, EvalMetrics]:
+    """Evaluate the persistence baseline separately for each temporal span."""
+    metrics = {}
+    for span in sorted(set(int(row[1]) for row in pair_rows)):
+        rows = pair_rows[pair_rows[:, 1] == span]
+        if rows.shape[0] == 0:
+            continue
+        metrics[str(span)] = evaluate_persistence(ds, case_ids, rows, args, mean, std, loss_weights)
+    return metrics
+
+
 def evaluate_rollout(model, params, ds, case_ids, args, mean, std, loss_weights, horizon: int) -> EvalMetrics:
     rng = np.random.default_rng(args.seed + 773)
     starts = np.arange(0, ds.n_frames - horizon, dtype=np.int32)
@@ -170,6 +192,14 @@ def evaluate_rollout(model, params, ds, case_ids, args, mean, std, loss_weights,
     return _finalize_accumulator(acc, ds, args.eval_batches, args.rel_l2_floor)
 
 
+def evaluate_rollouts(model, params, ds, case_ids, args, mean, std, loss_weights, horizons: list[int]) -> dict[str, EvalMetrics]:
+    """Evaluate autoregressive rollouts at multiple horizons."""
+    return {
+        str(int(horizon)): evaluate_rollout(model, params, ds, case_ids, args, mean, std, loss_weights, int(horizon))
+        for horizon in horizons
+    }
+
+
 def evaluate_persistence_rollout(ds, case_ids, args, mean, std, loss_weights, horizon: int) -> EvalMetrics:
     rng = np.random.default_rng(args.seed + 774)
     starts = np.arange(0, ds.n_frames - horizon, dtype=np.int32)
@@ -181,6 +211,14 @@ def evaluate_persistence_rollout(ds, case_ids, args, mean, std, loss_weights, ho
         target_norm = normalize_state(ds.read_state(cases, start_ids + horizon), mean, std)
         _accumulate_prediction(acc, pred_norm, target_norm, ds, mean, std, loss_weights)
     return _finalize_accumulator(acc, ds, args.eval_batches, args.rel_l2_floor)
+
+
+def evaluate_persistence_rollouts(ds, case_ids, args, mean, std, loss_weights, horizons: list[int]) -> dict[str, EvalMetrics]:
+    """Evaluate persistence rollouts at multiple horizons."""
+    return {
+        str(int(horizon)): evaluate_persistence_rollout(ds, case_ids, args, mean, std, loss_weights, int(horizon))
+        for horizon in horizons
+    }
 
 
 def evaluate_semigroup(model, params, ds, case_ids, args, mean, std, loss_weights) -> tuple[float, dict[str, float]]:
@@ -208,4 +246,3 @@ def evaluate_semigroup(model, params, ds, case_ids, args, mean, std, loss_weight
     return float(math.sqrt(sq / samples)), {
         channel: float(math.sqrt(sq_ch[i] / samples)) for i, channel in enumerate(ds.channels)
     }
-

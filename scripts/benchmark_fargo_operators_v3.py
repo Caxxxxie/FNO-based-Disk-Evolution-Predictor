@@ -35,6 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--radial-padding", choices=["zero", "edge", "reflect"], default="edge")
     parser.add_argument("--lr", type=float, default=1.0e-3)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
+    parser.add_argument("--warmup-steps", type=int, default=100)
+    parser.add_argument("--min-lr-ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--eval-every", type=int, default=100)
     parser.add_argument("--eval-batches", type=int, default=24)
@@ -48,6 +50,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--consistency-weight", type=float, default=0.01)
     parser.add_argument("--consistency-spans", type=int, nargs=2, default=[1, 1], metavar=("SPAN_A", "SPAN_B"))
     parser.add_argument("--rollout-horizon", type=int, default=8)
+    parser.add_argument(
+        "--rollout-horizons",
+        type=int,
+        nargs="+",
+        default=[1, 2, 4, 8],
+        help="Autoregressive horizons reported in metrics.json.",
+    )
     parser.add_argument("--time-input-units", choices=["normalized", "orbits", "code"], default="normalized")
     parser.add_argument("--dt-units", choices=["normalized", "orbits", "code"], default="orbits")
     parser.add_argument("--loss-weighting", choices=["uniform", "area"], default="area")
@@ -72,6 +81,10 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("temporal train + validation fractions must be < 1")
     if any(span <= 0 for span in args.fno_spans + args.fno_flow_spans + args.consistency_spans):
         raise ValueError("all spans must be positive")
+    if args.rollout_horizon <= 0 or any(horizon <= 0 for horizon in args.rollout_horizons):
+        raise ValueError("rollout horizons must be positive")
+    if args.rollout_horizon not in args.rollout_horizons:
+        args.rollout_horizons = sorted(set(args.rollout_horizons + [args.rollout_horizon]))
     if args.radial_kernel_size is not None:
         args.radial_kernels = [args.radial_kernel_size]
         args.radial_dilations = [1]
@@ -83,6 +96,10 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("all radial dilations must be positive")
     if args.rel_l2_floor <= 0.0:
         raise ValueError("--rel-l2-floor must be positive")
+    if args.warmup_steps < 0:
+        raise ValueError("--warmup-steps must be nonnegative")
+    if not (0.0 <= args.min_lr_ratio <= 1.0):
+        raise ValueError("--min-lr-ratio must be in [0, 1]")
     return args
 
 
