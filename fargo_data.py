@@ -149,6 +149,16 @@ def split_temporal_pairs(
     return packed
 
 
+def validate_temporal_pair_splits(pair_splits: dict[str, np.ndarray], context: str) -> None:
+    """Fail early when temporal splits are unusable for training/evaluation."""
+    required = ["train", "test"]
+    missing = [split for split in required if pair_splits.get(split, np.zeros((0, 3))).shape[0] == 0]
+    if missing:
+        raise ValueError(f"{context} has empty temporal split(s): {', '.join(missing)}")
+    if pair_splits.get("validation", np.zeros((0, 3))).shape[0] == 0:
+        print(f"Warning: {context} has no validation temporal pairs; training will validate on train pairs.")
+
+
 def sample_pairs(
     rng: np.random.Generator,
     case_ids: np.ndarray,
@@ -251,4 +261,3 @@ def set_time_span(batch: dict, t, dt) -> dict:
     out["t"] = t
     out["dt"] = dt
     return out
-

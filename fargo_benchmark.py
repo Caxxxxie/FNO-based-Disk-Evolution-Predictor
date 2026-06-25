@@ -10,26 +10,14 @@ from fargo_data import (
     FargoMemmapDataset,
     coordinate_grid,
     estimate_normalization,
-    make_batch,
     spatial_loss_weights,
     split_temporal_pairs,
+    validate_temporal_pair_splits,
 )
-from fargo_metrics import (
-    evaluate_model_by_span,
-    evaluate_model,
-    evaluate_persistence,
-    evaluate_persistence_by_span,
-    evaluate_persistence_rollout,
-    evaluate_persistence_rollouts,
-    evaluate_rollout,
-    evaluate_rollouts,
-    evaluate_semigroup,
-)
+from fargo_experiment import evaluate_operator, evaluate_persistence_suite, methods_from_args, select_pair_splits
 from fargo_outputs import (
-    ModelResult,
     save_loss_plot,
     save_model_checkpoint,
-    speed_ms_per_batch,
     summarize_splits,
     to_jsonable,
 )
@@ -42,141 +30,41 @@ def make_operator_model(args, coords, output_channels: int):
 
 
 def run_model(
-    name,
+    method,
     ds,
     coords,
-    train_cases,
-    val_cases,
-    test_cases,
     pair_splits,
     args,
     mean,
     std,
     loss_weights,
-    seed_offset,
 ):
     model = make_operator_model(args, coords, ds.n_channels)
     train_config = TrainingConfig.from_args(args)
-    use_consistency = name == "fno_flow" and args.consistency_weight > 0.0
     training_result = train_operator_model(
-        name,
+        method.name,
         model,
         ds,
-        train_cases,
-        val_cases if val_cases.size else train_cases,
+        ds.train_cases,
+        ds.validation_cases if ds.validation_cases.size else ds.train_cases,
         pair_splits["train"],
         pair_splits["validation"] if pair_splits["validation"].shape[0] else pair_splits["train"],
         train_config,
         mean,
         std,
         loss_weights,
-        seed_offset,
-        use_consistency,
+        method.seed_offset,
+        method.consistency_weight,
     )
     params = training_result.params
     history = training_result.history
     if args.save_checkpoints:
-        checkpoint_path = save_model_checkpoint(args.output_dir, name, params, ds, args, mean, std, pair_splits)
-        print(f"Saved {name} checkpoint to {checkpoint_path}")
-    speed_batch = make_batch(
-        ds,
-        np.random.default_rng(args.seed + 333),
-        test_cases if test_cases.size else train_cases,
-        pair_splits["test"],
-        args.batch_size,
-        mean,
-        std,
-    )
-    rollout = evaluate_rollout(
-        model,
-        params,
-        ds,
-        test_cases if test_cases.size else train_cases,
-        args,
-        mean,
-        std,
-        loss_weights,
-        args.rollout_horizon,
-    )
-    rollout_by_horizon = evaluate_rollouts(
-        model,
-        params,
-        ds,
-        test_cases if test_cases.size else train_cases,
-        args,
-        mean,
-        std,
-        loss_weights,
-        args.rollout_horizons,
-    )
-    sg = sg_ch = None
-    if name == "fno_flow":
-        sg, sg_ch = evaluate_semigroup(
-            model,
-            params,
-            ds,
-            test_cases if test_cases.size else train_cases,
-            args,
-            mean,
-            std,
-            loss_weights,
-        )
-    result = ModelResult(
-        train=evaluate_model(model, params, ds, train_cases, pair_splits["train"], args, mean, std, loss_weights),
-        validation=evaluate_model(
-            model,
-            params,
-            ds,
-            val_cases if val_cases.size else train_cases,
-            pair_splits["validation"] if pair_splits["validation"].shape[0] else pair_splits["train"],
-            args,
-            mean,
-            std,
-            loss_weights,
-        ),
-        heldout_time=evaluate_model(model, params, ds, train_cases, pair_splits["test"], args, mean, std, loss_weights),
-        heldout_parameter=evaluate_model(
-            model,
-            params,
-            ds,
-            test_cases if test_cases.size else val_cases,
-            pair_splits["train"],
-            args,
-            mean,
-            std,
-            loss_weights,
-        ),
-        heldout_parameter_time=evaluate_model(
-            model,
-            params,
-            ds,
-            test_cases if test_cases.size else val_cases,
-            pair_splits["test"],
-            args,
-            mean,
-            std,
-            loss_weights,
-        ),
-        rollout=rollout,
-        heldout_parameter_time_by_span=evaluate_model_by_span(
-            model,
-            params,
-            ds,
-            test_cases if test_cases.size else val_cases,
-            pair_splits["test"],
-            args,
-            mean,
-            std,
-            loss_weights,
-        ),
-        rollout_by_horizon=rollout_by_horizon,
-        speed_ms_per_batch=speed_ms_per_batch(model, params, speed_batch, args.speed_repeats),
-        trained_steps=training_result.trained_steps,
-        best_step=training_result.best_step,
-        best_validation_rmse=training_result.best_validation_rmse,
-        semigroup_rmse=sg,
-        semigroup_rmse_by_channel=sg_ch,
-    )
+        checkpoint_path = save_model_checkpoint(args.output_dir, method.name, params, ds, args, mean, std, pair_splits)
+        print(f"Saved {method.name} checkpoint to {checkpoint_path}")
+    result = evaluate_operator(model, params, ds, pair_splits, args, mean, std, loss_weights, method)
+    result.trained_steps = training_result.trained_steps
+    result.best_step = training_result.best_step
+    result.best_validation_rmse = training_result.best_validation_rmse
     return result, history
 
 
@@ -195,7 +83,13 @@ def run_benchmark(args) -> None:
     print(f"Time input units: {args.time_input_units}; residual dt units: {args.dt_units}")
     print(f"Loss weighting: {args.loss_weighting}")
 
-    all_spans = sorted(set(args.fno_spans + args.fno_flow_spans))
+    methods = methods_from_args(args)
+    if not methods:
+        raise ValueError("At least one trainable model must be selected")
+    all_spans = sorted({span for method in methods for span in method.spans})
+    invalid_spans = [span for span in all_spans if span >= ds.n_frames]
+    if invalid_spans:
+        raise ValueError(f"Training spans must be smaller than frame count ({ds.n_frames}); got {invalid_spans}")
     all_pair_splits = split_temporal_pairs(
         ds.t_norm,
         all_spans,
@@ -204,128 +98,40 @@ def run_benchmark(args) -> None:
         args.temporal_val_frac,
         args.seed,
     )
-    fno_pair_splits = {
-        split: rows[np.isin(rows[:, 1], args.fno_spans)] for split, rows in all_pair_splits.items()
-    }
-    fno_flow_pair_splits = {
-        split: rows[np.isin(rows[:, 1], args.fno_flow_spans)] for split, rows in all_pair_splits.items()
-    }
+    pair_splits_by_method = {method.name: select_pair_splits(all_pair_splits, method.spans) for method in methods}
+    for method in methods:
+        validate_temporal_pair_splits(pair_splits_by_method[method.name], method.name)
+        print(
+            f"Method {method.name}: spans={list(method.spans)} "
+            f"consistency_weight={method.consistency_weight}"
+        )
+    primary_method = next((method for method in methods if method.name == "fno_flow"), methods[0])
+    primary_pair_splits = pair_splits_by_method[primary_method.name]
     norm_rng = np.random.default_rng(args.seed + 111)
-    mean, std = estimate_normalization(ds, norm_rng, fno_flow_pair_splits["train"], args.normalization_samples)
+    mean, std = estimate_normalization(ds, norm_rng, primary_pair_splits["train"], args.normalization_samples)
     print("Normalization mean:", dict(zip(args.channels, mean.tolist())))
     print("Normalization std:", dict(zip(args.channels, std.tolist())))
 
-    persistence_rollout = evaluate_persistence_rollout(
-        ds,
-        ds.test_cases if ds.test_cases.size else ds.train_cases,
-        args,
-        mean,
-        std,
-        loss_weights,
-        args.rollout_horizon,
-    )
-    persistence_rollout_by_horizon = evaluate_persistence_rollouts(
-        ds,
-        ds.test_cases if ds.test_cases.size else ds.train_cases,
-        args,
-        mean,
-        std,
-        loss_weights,
-        args.rollout_horizons,
-    )
-    results = {
-        "persistence_rollout": to_jsonable(persistence_rollout),
-        "persistence_rollout_by_horizon": to_jsonable(persistence_rollout_by_horizon),
-        "persistence_fno_spans": to_jsonable(
-            ModelResult(
-                train=evaluate_persistence(ds, ds.train_cases, fno_pair_splits["train"], args, mean, std, loss_weights),
-                validation=evaluate_persistence(
-                    ds,
-                    ds.validation_cases if ds.validation_cases.size else ds.train_cases,
-                    fno_pair_splits["validation"],
-                    args,
-                    mean,
-                    std,
-                    loss_weights,
-                ),
-                heldout_time=evaluate_persistence(ds, ds.train_cases, fno_pair_splits["test"], args, mean, std, loss_weights),
-                heldout_parameter=evaluate_persistence(ds, ds.test_cases, fno_pair_splits["train"], args, mean, std, loss_weights),
-                heldout_parameter_time=evaluate_persistence(
-                    ds, ds.test_cases, fno_pair_splits["test"], args, mean, std, loss_weights
-                ),
-                rollout=persistence_rollout,
-                heldout_parameter_time_by_span=evaluate_persistence_by_span(
-                    ds, ds.test_cases, fno_pair_splits["test"], args, mean, std, loss_weights
-                ),
-                rollout_by_horizon=persistence_rollout_by_horizon,
-                speed_ms_per_batch=None,
-            )
-        ),
-        "persistence_fno_flow_spans": to_jsonable(
-            ModelResult(
-                train=evaluate_persistence(ds, ds.train_cases, fno_flow_pair_splits["train"], args, mean, std, loss_weights),
-                validation=evaluate_persistence(
-                    ds,
-                    ds.validation_cases if ds.validation_cases.size else ds.train_cases,
-                    fno_flow_pair_splits["validation"],
-                    args,
-                    mean,
-                    std,
-                    loss_weights,
-                ),
-                heldout_time=evaluate_persistence(
-                    ds, ds.train_cases, fno_flow_pair_splits["test"], args, mean, std, loss_weights
-                ),
-                heldout_parameter=evaluate_persistence(
-                    ds, ds.test_cases, fno_flow_pair_splits["train"], args, mean, std, loss_weights
-                ),
-                heldout_parameter_time=evaluate_persistence(
-                    ds, ds.test_cases, fno_flow_pair_splits["test"], args, mean, std, loss_weights
-                ),
-                rollout=persistence_rollout,
-                heldout_parameter_time_by_span=evaluate_persistence_by_span(
-                    ds, ds.test_cases, fno_flow_pair_splits["test"], args, mean, std, loss_weights
-                ),
-                rollout_by_horizon=persistence_rollout_by_horizon,
-                speed_ms_per_batch=None,
-            )
-        ),
-    }
+    results = {}
+    for method in methods:
+        pair_splits = pair_splits_by_method[method.name]
+        results[f"persistence_{method.name}"] = to_jsonable(
+            evaluate_persistence_suite(ds, pair_splits, args, mean, std, loss_weights)
+        )
     history_by_model = {}
-    if "fno" in args.models:
+    for method in methods:
         result, history = run_model(
-            "fno",
+            method,
             ds,
             coords,
-            ds.train_cases,
-            ds.validation_cases,
-            ds.test_cases,
-            fno_pair_splits,
+            pair_splits_by_method[method.name],
             args,
             mean,
             std,
             loss_weights,
-            10,
         )
-        results["fno"] = to_jsonable(result)
-        history_by_model["fno"] = history
-    if "fno_flow" in args.models:
-        result, history = run_model(
-            "fno_flow",
-            ds,
-            coords,
-            ds.train_cases,
-            ds.validation_cases,
-            ds.test_cases,
-            fno_flow_pair_splits,
-            args,
-            mean,
-            std,
-            loss_weights,
-            20,
-        )
-        results["fno_flow"] = to_jsonable(result)
-        history_by_model["fno_flow"] = history
+        results[method.name] = to_jsonable(result)
+        history_by_model[method.name] = history
 
     summary = {
         "setup": {
@@ -358,13 +164,21 @@ def run_benchmark(args) -> None:
             "temporal_bins": args.temporal_bins,
             "normalization_mean": dict(zip(args.channels, mean.tolist())),
             "normalization_std": dict(zip(args.channels, std.tolist())),
+            "normalization_reference_model": primary_method.name,
             "case_counts": {
                 "train": int(ds.train_cases.size),
                 "validation": int(ds.validation_cases.size),
                 "test": int(ds.test_cases.size),
             },
-            "temporal_pair_splits_fno": summarize_splits(fno_pair_splits),
-            "temporal_pair_splits_fno_flow": summarize_splits(fno_flow_pair_splits),
+            "methods": {
+                method.name: {
+                    "spans": list(method.spans),
+                    "consistency_weight": method.consistency_weight,
+                    "uses_semigroup_loss": method.uses_semigroup_loss,
+                    "temporal_pair_splits": summarize_splits(pair_splits_by_method[method.name]),
+                }
+                for method in methods
+            },
             "dataset_meta": ds.meta,
         },
         "results": results,

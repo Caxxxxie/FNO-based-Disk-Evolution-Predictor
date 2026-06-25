@@ -88,6 +88,7 @@ The main transient implementation is split into root-level modules:
 
 ```text
 fargo_data.py       memory-mapped dataset loading, temporal splits, batches
+fargo_experiment.py method definitions and shared evaluation suites
 fargo_model.py      core time-conditioned disk FNO architecture
 fargo_training.py   training config/result objects and JAX/Haiku training loop
 fargo_metrics.py    RMSE, relative L2, rollout, and semigroup evaluation
@@ -95,6 +96,11 @@ fargo_outputs.py    JSON, checkpoint, and loss-plot helpers
 fargo_benchmark.py  orchestration used by the CLI script
 fno.py              small shared FNO utilities for earlier steady demos
 ```
+
+The main method is `fno_flow`: a time-conditioned disk FNO that predicts the
+state increment over a requested time interval, trained on multiple temporal
+spans with an optional semigroup consistency loss. The `fno` option uses the
+same architecture without the semigroup term and is kept as a one-step ablation.
 
 Generate a larger memmap dataset with `scripts/generate_fargo_data_v2.py`, then
 run:

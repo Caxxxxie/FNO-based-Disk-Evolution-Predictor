@@ -105,7 +105,7 @@ def train_operator_model(
     std: np.ndarray,
     loss_weights: np.ndarray,
     seed_offset: int,
-    use_consistency: bool,
+    consistency_weight: float,
 ) -> TrainingResult:
     config.validate()
     rng = np.random.default_rng(config.seed + seed_offset)
@@ -137,7 +137,7 @@ def train_operator_model(
         pred = model.apply(params, batch)
         sup = batch_mse(pred, batch["y"], loss_weights_jax)
         consistency = jnp.asarray(0.0, dtype=sup.dtype)
-        if use_consistency:
+        if consistency_weight > 0.0:
             direct = model.apply(params, set_time_span(consistency_batch, consistency_batch["t_ab"], consistency_batch["dt_ab"]))
             first = model.apply(params, consistency_batch)
             second_batch = dict(consistency_batch)
@@ -148,7 +148,7 @@ def train_operator_model(
             consistency = batch_mse(direct, second, loss_weights_jax) + batch_mse(
                 direct, consistency_batch["y"], loss_weights_jax
             )
-        return sup + config.consistency_weight * consistency, (sup, consistency)
+        return sup + consistency_weight * consistency, (sup, consistency)
 
     @jax.jit
     def train_step(params, opt_state, batch, consistency_batch):
@@ -164,7 +164,7 @@ def train_operator_model(
     empty_consistency = make_consistency_batch(ds, rng, train_cases, span_a, span_b, min(config.batch_size, 2), mean, std)
     for step in range(1, config.steps + 1):
         batch = make_batch(ds, rng, train_cases, train_pairs, config.batch_size, mean, std)
-        if use_consistency:
+        if consistency_weight > 0.0:
             consistency_batch = make_consistency_batch(ds, rng, train_cases, span_a, span_b, config.batch_size, mean, std)
         else:
             consistency_batch = empty_consistency
@@ -191,7 +191,7 @@ def train_operator_model(
                     "step": step,
                     "batch_rmse": float(jnp.sqrt(loss)),
                     "supervised_rmse": float(jnp.sqrt(sup)),
-                    "consistency_rmse": float(jnp.sqrt(consistency)) if use_consistency else 0.0,
+                    "consistency_rmse": float(jnp.sqrt(consistency)) if consistency_weight > 0.0 else 0.0,
                     "train_rmse": train_eval.rmse,
                     "validation_rmse": val_eval.rmse,
                     "learning_rate": float(schedule(step)),

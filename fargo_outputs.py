@@ -137,6 +137,7 @@ def save_model_checkpoint(
     checkpoint = {
         "format": "fargo_operator_v3_fno_checkpoint",
         "model": name,
+        "method": name,
         "params": jax.tree_util.tree_map(lambda x: np.asarray(x), jax.device_get(params)),
         "channels": list(ds.channels),
         "mean": np.asarray(mean, dtype=np.float32),
@@ -168,6 +169,8 @@ def save_model_checkpoint(
             "temporal_val_frac": args.temporal_val_frac,
             "fno_spans": list(args.fno_spans),
             "fno_flow_spans": list(args.fno_flow_spans),
+            "consistency_weight": args.consistency_weight,
+            "consistency_spans": list(args.consistency_spans),
         },
         "case_splits": {
             "train": np.asarray(ds.train_cases, dtype=np.int32),

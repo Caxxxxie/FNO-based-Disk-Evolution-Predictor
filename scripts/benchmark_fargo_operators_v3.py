@@ -22,7 +22,13 @@ def parse_args() -> argparse.Namespace:
         default=["log_sigma", "delta_v_r", "delta_v_theta"],
         help="State channels to train. Defaults to perturbation velocities, not full velocities.",
     )
-    parser.add_argument("--models", nargs="+", default=["fno"], choices=["fno", "fno_flow"])
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=["fno_flow"],
+        choices=["fno", "fno_flow"],
+        help="fno_flow is the main semigroup-regularized operator; fno is the one-step ablation.",
+    )
     parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--width", type=int, default=48)
