@@ -127,11 +127,16 @@ For local tuning, compare small FNO variants with the same dataset/capacity:
 python scripts/summarize_fargo_metrics.py \
   results/v3_local_ablation_fno_span1_200/metrics.json \
   results/v3_local_ablation_fno_span12_200/metrics.json \
-  results/v3_local_ablation_fno_span124_200/metrics.json
+  results/v3_local_ablation_fno_span124_200/metrics.json \
+  results/v3_local_tune_fno_w32d3m16_b2_800_lr8e4/metrics.json
 ```
 
 On the current 16-case local v3 dataset, span-1 FNO is the strongest default;
-multi-span training is treated as an extension to validate, not the default.
+multi-span training is treated as an extension to validate, not the default. The
+best local tuning run so far uses `--width 32 --depth 3 --modes-theta 16
+--batch-size 2 --steps 800 --lr 8e-4`, reducing held-out parameter/time error
+from the persistence baseline's 5.57% to 2.91%, and rollout@8 from 22.74% to
+11.51%.
 
 On the NCSA Jupyter server, after generating the full v2 dataset under
 `fargo_data_v2/data/fargo_transient_10orbits_128f`, start with a short training
@@ -143,10 +148,11 @@ python scripts/benchmark_fargo_operators_v3.py \
   --output-dir results/server_v3_smoke \
   --models fno \
   --steps 200 \
-  --batch-size 4 \
+  --batch-size 2 \
   --width 32 \
   --depth 3 \
   --modes-theta 16 \
+  --lr 8e-4 \
   --eval-every 50 \
   --eval-batches 4 \
   --normalization-samples 256 \
