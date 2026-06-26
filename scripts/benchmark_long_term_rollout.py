@@ -37,12 +37,23 @@ import optax
 
 ROOT = Path(__file__).resolve().parents[1]
 ORBIT_PERIOD = 2.0 * math.pi
-MODEL_CHOICES = ("geometry_aware_fno", "geometry_radial_fno", "plain_fno", "unet", "periodic_unet", "convlstm")
+MODEL_CHOICES = (
+    "geometry_aware_fno",
+    "geometry_radial_fno",
+    "fno_reflect2d",
+    "plain_fno",
+    "unet",
+    "periodic_unet",
+    "convlstm",
+)
 MODEL_ALIASES = {
     "fno": "geometry_aware_fno",
     "fno_radial": "geometry_radial_fno",
     "radial_fno": "geometry_radial_fno",
     "geometry-radial-fno": "geometry_radial_fno",
+    "reflect2d_fno": "fno_reflect2d",
+    "reflect2d-fno": "fno_reflect2d",
+    "fno-reflect2d": "fno_reflect2d",
     "plain-fno": "plain_fno",
     "geometry-aware-fno": "geometry_aware_fno",
     "geometry-fno": "geometry_aware_fno",
@@ -478,6 +489,21 @@ def make_history_model(name: str, coords: np.ndarray, args: argparse.Namespace, 
             h = hk.Linear(args.width)(history_grid_inputs(batch, coords))
             for i in range(args.depth):
                 spectral = V3.PlainSpectralConv2D(args.width, args.modes_r, args.modes_theta, name=f"plain_spectral_{i}")(h)
+                pointwise = hk.Linear(args.width, name=f"pointwise_{i}")(h)
+                h = jax.nn.gelu(spectral + pointwise)
+            y = hk.nets.MLP([args.width, output_channels], activation=jax.nn.gelu)(h)
+            return residual_output(y, batch)
+
+    elif name == "fno_reflect2d":
+        def forward(batch):
+            h = hk.Linear(args.width)(history_grid_inputs(batch, coords))
+            for i in range(args.depth):
+                spectral = V3.ReflectSpectralConv2D(
+                    args.width,
+                    args.modes_r,
+                    args.modes_theta,
+                    name=f"reflect_spectral_{i}",
+                )(h)
                 pointwise = hk.Linear(args.width, name=f"pointwise_{i}")(h)
                 h = jax.nn.gelu(spectral + pointwise)
             y = hk.nets.MLP([args.width, output_channels], activation=jax.nn.gelu)(h)

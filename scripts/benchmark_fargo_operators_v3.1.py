@@ -33,7 +33,16 @@ import optax
 
 ROOT = Path(__file__).resolve().parents[1]
 ORBIT_PERIOD = 2.0 * math.pi
-TRAINABLE_MODEL_NAMES = ("fno", "fno_radial", "fno_flow", "plain_fno", "unet", "periodic_unet", "convlstm")
+TRAINABLE_MODEL_NAMES = (
+    "fno",
+    "fno_radial",
+    "fno_reflect2d",
+    "fno_flow",
+    "plain_fno",
+    "unet",
+    "periodic_unet",
+    "convlstm",
+)
 ANALYTIC_BASELINE_NAMES = ("linear_extrapolation",)
 MODEL_CHOICES = ("all",) + TRAINABLE_MODEL_NAMES + ANALYTIC_BASELINE_NAMES
 
@@ -115,6 +124,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--consistency-weight", type=float, default=0.01)
     parser.add_argument("--consistency-spans", type=int, nargs=2, default=[1, 1], metavar=("SPAN_A", "SPAN_B"))
     parser.add_argument("--rollout-horizon", type=int, default=8)
+    parser.add_argument(
+        "--rollout-train-weight",
+        type=float,
+        default=0.0,
+        help="Optional autoregressive rollout loss weight during training.",
+    )
+    parser.add_argument(
+        "--rollout-train-horizon",
+        type=int,
+        default=1,
+        help="Number of one-step autoregressive predictions used by rollout training loss.",
+    )
     parser.add_argument("--time-input-units", choices=["normalized", "orbits", "code"], default="normalized")
     parser.add_argument("--dt-units", choices=["normalized", "orbits", "code"], default="orbits")
     parser.add_argument("--loss-weighting", choices=["uniform", "area"], default="area")
@@ -153,6 +174,10 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("temporal train + validation fractions must be < 1")
     if any(span <= 0 for span in args.fno_spans + args.fno_flow_spans + args.consistency_spans):
         raise ValueError("all spans must be positive")
+    if args.rollout_train_weight < 0.0:
+        raise ValueError("--rollout-train-weight must be nonnegative")
+    if args.rollout_train_horizon <= 0:
+        raise ValueError("--rollout-train-horizon must be positive")
     if args.radial_kernel_size is not None:
         args.radial_kernels = [args.radial_kernel_size]
         args.radial_dilations = [1]
@@ -408,6 +433,45 @@ def make_consistency_batch(
     }
 
 
+def make_rollout_batch(
+    ds: FargoMemmapDataset,
+    rng: np.random.Generator,
+    case_ids: np.ndarray,
+    horizon: int,
+    batch_size: int,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> dict[str, jnp.ndarray]:
+    max_start = ds.n_frames - horizon
+    if max_start <= 0:
+        raise ValueError("Not enough frames for rollout training horizon")
+    cases = rng.choice(case_ids, size=batch_size, replace=True).astype(np.int32)
+    starts = rng.integers(0, max_start, size=batch_size, dtype=np.int32)
+    prev_starts = np.maximum(starts - 1, 0)
+    x_prev_raw = ds.read_state(cases, prev_starts)
+    x0_raw = ds.read_state(cases, starts)
+    targets = []
+    times = []
+    dts = []
+    one_step = np.ones(batch_size, dtype=np.int32)
+    for i in range(horizon):
+        targets.append(ds.read_state(cases, starts + i + 1))
+        t_i, dt_i = ds.read_time(cases, starts + i, one_step)
+        times.append(t_i)
+        dts.append(dt_i)
+    x_prev = (x_prev_raw - mean.reshape((1, 1, 1, -1))) / std.reshape((1, 1, 1, -1))
+    x0 = (x0_raw - mean.reshape((1, 1, 1, -1))) / std.reshape((1, 1, 1, -1))
+    y = (np.stack(targets, axis=1) - mean.reshape((1, 1, 1, 1, -1))) / std.reshape((1, 1, 1, 1, -1))
+    return {
+        "x_prev": jnp.asarray(x_prev),
+        "x0": jnp.asarray(x0),
+        "targets": jnp.asarray(y),
+        "mu": jnp.asarray(ds.read_params(cases)),
+        "t": jnp.asarray(np.stack(times, axis=1)),
+        "dt": jnp.asarray(np.stack(dts, axis=1)),
+    }
+
+
 def estimate_normalization(
     ds: FargoMemmapDataset,
     rng: np.random.Generator,
@@ -637,6 +701,57 @@ class PlainSpectralConv2D(hk.Module):
         return jnp.fft.irfft2(out_ft, s=(ny, nx), axes=(1, 2))
 
 
+class ReflectSpectralConv2D(hk.Module):
+    """2D spectral conv with even radial reflection and periodic theta."""
+
+    def __init__(self, out_channels: int, modes_r: int, modes_theta: int, name: str | None = None):
+        super().__init__(name=name)
+        self.out_channels = out_channels
+        self.modes_r = modes_r
+        self.modes_theta = modes_theta
+
+    def __call__(self, x):
+        batch, ny, nx, in_channels = x.shape
+        if ny > 2:
+            reflected = jnp.concatenate([x, x[:, -2:0:-1, :, :]], axis=1)
+        else:
+            reflected = x
+        n_reflect = reflected.shape[1]
+        x_ft = jnp.fft.rfft2(reflected, axes=(1, 2))
+        mr = min(self.modes_r, max(1, n_reflect // 2))
+        mt = min(self.modes_theta, nx // 2 + 1)
+        scale = 1.0 / math.sqrt(in_channels * self.out_channels)
+        pos_real = hk.get_parameter(
+            "weight_pos_real",
+            (mr, mt, in_channels, self.out_channels),
+            init=hk.initializers.RandomNormal(scale),
+        )
+        pos_imag = hk.get_parameter(
+            "weight_pos_imag",
+            (mr, mt, in_channels, self.out_channels),
+            init=hk.initializers.RandomNormal(scale),
+        )
+        neg_real = hk.get_parameter(
+            "weight_neg_real",
+            (mr, mt, in_channels, self.out_channels),
+            init=hk.initializers.RandomNormal(scale),
+        )
+        neg_imag = hk.get_parameter(
+            "weight_neg_imag",
+            (mr, mt, in_channels, self.out_channels),
+            init=hk.initializers.RandomNormal(scale),
+        )
+        pos_weight = pos_real + 1j * pos_imag
+        neg_weight = neg_real + 1j * neg_imag
+        out_ft = jnp.zeros((batch, n_reflect, nx // 2 + 1, self.out_channels), dtype=jnp.complex64)
+        low_pos = jnp.einsum("byxi,yxio->byxo", x_ft[:, :mr, :mt, :], pos_weight)
+        low_neg = jnp.einsum("byxi,yxio->byxo", x_ft[:, -mr:, :mt, :], neg_weight)
+        out_ft = out_ft.at[:, :mr, :mt, :].set(low_pos)
+        out_ft = out_ft.at[:, -mr:, :mt, :].set(low_neg)
+        mixed = jnp.fft.irfft2(out_ft, s=(n_reflect, nx), axes=(1, 2))
+        return mixed[:, :ny, :, :]
+
+
 def make_plain_fno(
     coords,
     width,
@@ -650,6 +765,27 @@ def make_plain_fno(
         h = hk.Linear(width)(grid_inputs(batch, coords))
         for i in range(depth):
             spectral = PlainSpectralConv2D(width, modes_r, modes_theta, name=f"plain_spectral_{i}")(h)
+            pointwise = hk.Linear(width, name=f"pointwise_{i}")(h)
+            h = jax.nn.gelu(spectral + pointwise)
+        y = hk.nets.MLP([width, output_channels], activation=jax.nn.gelu)(h)
+        return batch["x"] + batch["dt"][:, None, None, :] * y if residual else y
+
+    return hk.without_apply_rng(hk.transform(forward))
+
+
+def make_reflect_fno(
+    coords,
+    width,
+    modes_r,
+    modes_theta,
+    depth,
+    output_channels: int,
+    residual: bool = True,
+):
+    def forward(batch):
+        h = hk.Linear(width)(grid_inputs(batch, coords))
+        for i in range(depth):
+            spectral = ReflectSpectralConv2D(width, modes_r, modes_theta, name=f"reflect_spectral_{i}")(h)
             pointwise = hk.Linear(width, name=f"pointwise_{i}")(h)
             h = jax.nn.gelu(spectral + pointwise)
         y = hk.nets.MLP([width, output_channels], activation=jax.nn.gelu)(h)
@@ -819,6 +955,8 @@ def make_model(name: str, coords, args: argparse.Namespace, output_channels: int
         )
     if name == "plain_fno":
         return make_plain_fno(coords, args.width, args.modes_r, args.modes_theta, args.depth, output_channels)
+    if name == "fno_reflect2d":
+        return make_reflect_fno(coords, args.width, args.modes_r, args.modes_theta, args.depth, output_channels)
     if name == "unet":
         return make_unet_stepper(coords, args.width, args.unet_levels, output_channels)
     if name == "periodic_unet":
@@ -875,7 +1013,7 @@ def train_model(
         return batch_mse(pred, batch["y"], loss_weights_jax)
 
     @jax.jit
-    def total_loss(params, batch, consistency_batch):
+    def total_loss(params, batch, consistency_batch, rollout_batch):
         pred = model.apply(params, batch)
         sup = batch_mse(pred, batch["y"], loss_weights_jax)
         consistency = jnp.asarray(0.0, dtype=sup.dtype)
@@ -890,13 +1028,32 @@ def train_model(
             consistency = batch_mse(direct, second, loss_weights_jax) + batch_mse(
                 direct, consistency_batch["y"], loss_weights_jax
             )
-        return sup + args.consistency_weight * consistency, (sup, consistency)
+        rollout = jnp.asarray(0.0, dtype=sup.dtype)
+        if args.rollout_train_weight > 0.0:
+            current = rollout_batch["x0"]
+            previous = rollout_batch["x_prev"]
+            losses = []
+            for i in range(args.rollout_train_horizon):
+                step_batch = {
+                    "x_prev": previous,
+                    "x": current,
+                    "mu": rollout_batch["mu"],
+                    "t": rollout_batch["t"][:, i, :],
+                    "dt": rollout_batch["dt"][:, i, :],
+                }
+                previous = current
+                current = model.apply(params, step_batch)
+                losses.append(batch_mse(current, rollout_batch["targets"][:, i, ...], loss_weights_jax))
+            rollout = sum(losses) / len(losses)
+        return sup + args.consistency_weight * consistency + args.rollout_train_weight * rollout, (sup, consistency, rollout)
 
     @jax.jit
-    def train_step(params, opt_state, batch, consistency_batch):
-        (loss, (sup, consistency)), grads = jax.value_and_grad(total_loss, has_aux=True)(params, batch, consistency_batch)
+    def train_step(params, opt_state, batch, consistency_batch, rollout_batch):
+        (loss, (sup, consistency, rollout)), grads = jax.value_and_grad(total_loss, has_aux=True)(
+            params, batch, consistency_batch, rollout_batch
+        )
         updates, opt_state = opt.update(grads, opt_state, params)
-        return optax.apply_updates(params, updates), opt_state, loss, sup, consistency
+        return optax.apply_updates(params, updates), opt_state, loss, sup, consistency, rollout
 
     history = []
     best_params = params
@@ -904,13 +1061,34 @@ def train_model(
     best_step = 0
     stale = 0
     empty_consistency = make_consistency_batch(ds, rng, train_cases, span_a, span_b, min(args.batch_size, 2), mean, std)
+    empty_rollout = make_rollout_batch(
+        ds,
+        rng,
+        train_cases,
+        args.rollout_train_horizon,
+        min(args.batch_size, 2),
+        mean,
+        std,
+    )
     for step in range(1, args.steps + 1):
         batch = make_batch(ds, rng, train_cases, train_pairs, args.batch_size, mean, std)
         if use_consistency:
             consistency_batch = make_consistency_batch(ds, rng, train_cases, span_a, span_b, args.batch_size, mean, std)
         else:
             consistency_batch = empty_consistency
-        params, opt_state, loss, sup, consistency = train_step(params, opt_state, batch, consistency_batch)
+        if args.rollout_train_weight > 0.0:
+            rollout_batch = make_rollout_batch(
+                ds,
+                rng,
+                train_cases,
+                args.rollout_train_horizon,
+                args.batch_size,
+                mean,
+                std,
+            )
+        else:
+            rollout_batch = empty_rollout
+        params, opt_state, loss, sup, consistency, rollout = train_step(params, opt_state, batch, consistency_batch, rollout_batch)
         if step == 1 or step % args.eval_every == 0 or step == args.steps:
             train_eval = evaluate_model(
                 model,
@@ -945,6 +1123,7 @@ def train_model(
                     "batch_rmse": float(jnp.sqrt(loss)),
                     "supervised_rmse": float(jnp.sqrt(sup)),
                     "consistency_rmse": float(jnp.sqrt(consistency)) if use_consistency else 0.0,
+                    "rollout_rmse": float(jnp.sqrt(rollout)) if args.rollout_train_weight > 0.0 else 0.0,
                     "train_rmse": train_eval.rmse,
                     "validation_rmse": val_eval.rmse,
                 }
@@ -1940,6 +2119,7 @@ def main() -> None:
         )
     single_step_trainable = [
         ("plain_fno", 30),
+        ("fno_reflect2d", 32),
         ("unet", 40),
         ("periodic_unet", 45),
         ("convlstm", 50),
@@ -2008,6 +2188,7 @@ def main() -> None:
                 "geometry_aware_fno": "theta Fourier spectral conv + multiscale nonperiodic radial local conv",
                 "fno_radial": "geometry-aware FNO with theta Fourier, radial local conv, and reflect-FFT radial global mixing",
                 "plain_fno": "rectangular 2D spectral conv with positive and negative radial low modes",
+                "fno_reflect2d": "2D spectral conv on an even radial reflection extension and periodic theta",
                 "unet": "convolutional encoder-decoder residual time stepper",
                 "periodic_unet": "U-Net with theta circular padding and configured radial padding",
                 "convlstm": "two-frame convolutional LSTM residual time stepper",
@@ -2034,6 +2215,8 @@ def main() -> None:
             "fno_spans": args.fno_spans,
             "fno_flow_spans": args.fno_flow_spans,
             "rollout_horizon": args.rollout_horizon,
+            "rollout_train_weight": args.rollout_train_weight,
+            "rollout_train_horizon": args.rollout_train_horizon,
             "save_checkpoints": args.save_checkpoints,
             "temporal_bins": args.temporal_bins,
             "normalization_mean": dict(zip(args.channels, mean.tolist())),
