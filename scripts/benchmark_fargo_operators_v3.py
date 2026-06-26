@@ -75,14 +75,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rel-l2-floor", type=float, default=1.0e-6)
     parser.add_argument("--early-stop-patience", type=int, default=0)
     parser.add_argument("--early-stop-min-delta", type=float, default=1.0e-4)
-    parser.add_argument("--jax-platform", choices=["default", "cpu", "gpu"], default="default")
+    parser.add_argument("--jax-platform", choices=["default", "cpu", "gpu", "cuda"], default="default")
     parser.add_argument("--save-loss-plots", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--save-checkpoints", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
     if args.jax_platform != "default":
         import jax
 
-        jax.config.update("jax_platforms", args.jax_platform)
+        platform = "cuda" if args.jax_platform == "gpu" else args.jax_platform
+        jax.config.update("jax_platforms", platform)
+        args.jax_platform = platform
     if args.temporal_bins <= 0:
         raise ValueError("--temporal-bins must be positive")
     if not (0.0 < args.temporal_train_frac < 1.0):

@@ -182,13 +182,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early-stop-patience", type=int, default=0)
     parser.add_argument("--early-stop-min-delta", type=float, default=1.0e-4)
     parser.add_argument("--save-checkpoints", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--jax-platform", choices=["default", "cpu", "gpu"], default="default")
+    parser.add_argument("--jax-platform", choices=["default", "cpu", "gpu", "cuda"], default="default")
     args = parser.parse_args()
     if args.history_stride is None:
         args.history_stride = args.step_span
     args.models = canonicalize_models(args.models)
     if args.jax_platform != "default":
-        jax.config.update("jax_platforms", args.jax_platform)
+        platform = "cuda" if args.jax_platform == "gpu" else args.jax_platform
+        jax.config.update("jax_platforms", platform)
+        args.jax_platform = platform
     validate_args(args)
     resolve_training_length(args)
     return args
