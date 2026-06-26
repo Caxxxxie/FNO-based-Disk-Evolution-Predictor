@@ -37,9 +37,12 @@ import optax
 
 ROOT = Path(__file__).resolve().parents[1]
 ORBIT_PERIOD = 2.0 * math.pi
-MODEL_CHOICES = ("geometry_aware_fno", "plain_fno", "unet", "periodic_unet", "convlstm")
+MODEL_CHOICES = ("geometry_aware_fno", "geometry_radial_fno", "plain_fno", "unet", "periodic_unet", "convlstm")
 MODEL_ALIASES = {
     "fno": "geometry_aware_fno",
+    "fno_radial": "geometry_radial_fno",
+    "radial_fno": "geometry_radial_fno",
+    "geometry-radial-fno": "geometry_radial_fno",
     "plain-fno": "plain_fno",
     "geometry-aware-fno": "geometry_aware_fno",
     "geometry-fno": "geometry_aware_fno",
@@ -443,6 +446,26 @@ def make_history_model(name: str, coords: np.ndarray, args: argparse.Namespace, 
                     args.radial_kernels,
                     args.radial_dilations,
                     args.radial_padding,
+                    name=f"theta_spectral_radial_{i}",
+                )(h)
+                pointwise = hk.Linear(args.width, name=f"pointwise_{i}")(h)
+                h = jax.nn.gelu(spectral + pointwise)
+            y = hk.nets.MLP([args.width, output_channels], activation=jax.nn.gelu)(h)
+            return residual_output(y, batch)
+
+    elif name == "geometry_radial_fno":
+        def forward(batch):
+            h = hk.Linear(args.width)(history_grid_inputs(batch, coords))
+            for i in range(args.depth):
+                spectral = V3.ThetaSpectralRadialConv(
+                    args.width,
+                    args.modes_theta,
+                    args.radial_kernels,
+                    args.radial_dilations,
+                    args.radial_padding,
+                    modes_r=args.modes_r,
+                    radial_global_mixing="reflect_fft",
+                    radial_global_weight=1.0,
                     name=f"theta_spectral_radial_{i}",
                 )(h)
                 pointwise = hk.Linear(args.width, name=f"pointwise_{i}")(h)

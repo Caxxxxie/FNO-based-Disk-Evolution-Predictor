@@ -33,7 +33,7 @@ import optax
 
 ROOT = Path(__file__).resolve().parents[1]
 ORBIT_PERIOD = 2.0 * math.pi
-TRAINABLE_MODEL_NAMES = ("fno", "fno_flow", "plain_fno", "unet", "periodic_unet", "convlstm")
+TRAINABLE_MODEL_NAMES = ("fno", "fno_radial", "fno_flow", "plain_fno", "unet", "periodic_unet", "convlstm")
 ANALYTIC_BASELINE_NAMES = ("linear_extrapolation",)
 MODEL_CHOICES = ("all",) + TRAINABLE_MODEL_NAMES + ANALYTIC_BASELINE_NAMES
 
@@ -86,6 +86,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--radial-kernels", type=int, nargs="+", default=[3, 5, 5])
     parser.add_argument("--radial-dilations", type=int, nargs="+", default=[1, 2, 4])
     parser.add_argument("--radial-padding", choices=["zero", "edge", "reflect"], default="edge")
+    parser.add_argument(
+        "--radial-global-mixing",
+        choices=["none", "reflect_fft"],
+        default="none",
+        help="Optional radial global mixing branch for geometry-aware FNO layers.",
+    )
+    parser.add_argument(
+        "--radial-global-weight",
+        type=float,
+        default=1.0,
+        help="Relative weight for the radial global mixing branch.",
+    )
     parser.add_argument("--unet-levels", type=int, default=3)
     parser.add_argument("--convlstm-steps", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1.0e-3)
@@ -150,6 +162,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("all radial kernels must be positive odd integers")
     if any(dilation <= 0 for dilation in args.radial_dilations):
         raise ValueError("all radial dilations must be positive")
+    if args.radial_global_weight < 0.0:
+        raise ValueError("--radial-global-weight must be nonnegative")
     if args.unet_levels <= 0:
         raise ValueError("--unet-levels must be positive")
     if args.convlstm_steps <= 0:
@@ -438,6 +452,9 @@ class ThetaSpectralRadialConv(hk.Module):
         radial_kernels: list[int],
         radial_dilations: list[int],
         radial_padding: str,
+        modes_r: int = 0,
+        radial_global_mixing: str = "none",
+        radial_global_weight: float = 1.0,
         name: str | None = None,
     ):
         super().__init__(name=name)
@@ -446,6 +463,9 @@ class ThetaSpectralRadialConv(hk.Module):
         self.radial_kernels = tuple(radial_kernels)
         self.radial_dilations = tuple(radial_dilations)
         self.radial_padding = radial_padding
+        self.modes_r = modes_r
+        self.radial_global_mixing = radial_global_mixing
+        self.radial_global_weight = radial_global_weight
 
     def __call__(self, x):
         batch, ny, nx, in_channels = x.shape
@@ -478,7 +498,50 @@ class ThetaSpectralRadialConv(hk.Module):
                 )(x_padded)
             )
         radial_mixed = sum(radial_terms) / math.sqrt(len(radial_terms))
-        return theta_mixed + radial_mixed
+        result = theta_mixed + radial_mixed
+        if self.radial_global_mixing == "reflect_fft" and self.radial_global_weight > 0.0:
+            radial_global = RadialReflectSpectralConv(
+                self.out_channels,
+                self.modes_r,
+                name="radial_reflect_global",
+            )(x)
+            result = result + self.radial_global_weight * radial_global
+        return result
+
+
+class RadialReflectSpectralConv(hk.Module):
+    """Nonperiodic radial global mixing via even reflection and low Fourier modes."""
+
+    def __init__(self, out_channels: int, modes_r: int, name: str | None = None):
+        super().__init__(name=name)
+        self.out_channels = out_channels
+        self.modes_r = modes_r
+
+    def __call__(self, x):
+        batch, ny, nx, in_channels = x.shape
+        if ny <= 1:
+            return hk.Linear(self.out_channels, with_bias=False, name="degenerate_linear")(x)
+        reflected = jnp.concatenate([x, x[:, -2:0:-1, :, :]], axis=1)
+        n_reflect = reflected.shape[1]
+        x_ft = jnp.fft.rfft(reflected, axis=1)
+        mr = min(self.modes_r, n_reflect // 2 + 1)
+        scale = 1.0 / math.sqrt(in_channels * self.out_channels)
+        real = hk.get_parameter(
+            "weight_real",
+            (mr, in_channels, self.out_channels),
+            init=hk.initializers.RandomNormal(scale),
+        )
+        imag = hk.get_parameter(
+            "weight_imag",
+            (mr, in_channels, self.out_channels),
+            init=hk.initializers.RandomNormal(scale),
+        )
+        weight = real + 1j * imag
+        out_ft = jnp.zeros((batch, n_reflect // 2 + 1, nx, self.out_channels), dtype=jnp.complex64)
+        low = jnp.einsum("bkxi,kio->bkxo", x_ft[:, :mr, :, :], weight)
+        out_ft = out_ft.at[:, :mr, :, :].set(low)
+        mixed = jnp.fft.irfft(out_ft, n=n_reflect, axis=1)
+        return mixed[:, :ny, :, :]
 
 
 def grid_inputs(batch, coords):
@@ -501,6 +564,8 @@ def make_fno(
     radial_kernels: list[int] | None = None,
     radial_dilations: list[int] | None = None,
     radial_padding: str = "edge",
+    radial_global_mixing: str = "none",
+    radial_global_weight: float = 1.0,
 ):
     radial_kernels = [3, 5, 5] if radial_kernels is None else radial_kernels
     radial_dilations = [1, 2, 4] if radial_dilations is None else radial_dilations
@@ -514,6 +579,9 @@ def make_fno(
                 radial_kernels,
                 radial_dilations,
                 radial_padding,
+                modes_r=modes_r,
+                radial_global_mixing=radial_global_mixing,
+                radial_global_weight=radial_global_weight,
                 name=f"theta_spectral_radial_{i}",
             )(h)
             pointwise = hk.Linear(width, name=f"pointwise_{i}")(h)
@@ -734,7 +802,8 @@ def make_convlstm_stepper(
 
 
 def make_model(name: str, coords, args: argparse.Namespace, output_channels: int):
-    if name in {"fno", "fno_flow"}:
+    if name in {"fno", "fno_radial", "fno_flow"}:
+        radial_global_mixing = "reflect_fft" if name == "fno_radial" else args.radial_global_mixing
         return make_fno(
             coords,
             args.width,
@@ -745,6 +814,8 @@ def make_model(name: str, coords, args: argparse.Namespace, output_channels: int
             radial_kernels=args.radial_kernels,
             radial_dilations=args.radial_dilations,
             radial_padding=args.radial_padding,
+            radial_global_mixing=radial_global_mixing,
+            radial_global_weight=args.radial_global_weight,
         )
     if name == "plain_fno":
         return make_plain_fno(coords, args.width, args.modes_r, args.modes_theta, args.depth, output_channels)
@@ -1588,6 +1659,8 @@ def save_model_checkpoint(
             "radial_kernels": list(args.radial_kernels),
             "radial_dilations": list(args.radial_dilations),
             "radial_padding": args.radial_padding,
+            "radial_global_mixing": "reflect_fft" if name == "fno_radial" else args.radial_global_mixing,
+            "radial_global_weight": args.radial_global_weight,
             "unet_levels": args.unet_levels,
             "convlstm_steps": args.convlstm_steps,
             "residual": True,
@@ -1871,6 +1944,7 @@ def main() -> None:
         ("periodic_unet", 45),
         ("convlstm", 50),
         ("fno", 10),
+        ("fno_radial", 12),
     ]
     for model_name, seed_offset in single_step_trainable:
         if model_name not in args.models:
@@ -1926,10 +2000,13 @@ def main() -> None:
             "radial_kernels": args.radial_kernels,
             "radial_dilations": args.radial_dilations,
             "radial_padding": args.radial_padding,
+            "radial_global_mixing": args.radial_global_mixing,
+            "radial_global_weight": args.radial_global_weight,
             "unet_levels": args.unet_levels,
             "convlstm_steps": args.convlstm_steps,
             "model_family": {
                 "geometry_aware_fno": "theta Fourier spectral conv + multiscale nonperiodic radial local conv",
+                "fno_radial": "geometry-aware FNO with theta Fourier, radial local conv, and reflect-FFT radial global mixing",
                 "plain_fno": "rectangular 2D spectral conv with positive and negative radial low modes",
                 "unet": "convolutional encoder-decoder residual time stepper",
                 "periodic_unet": "U-Net with theta circular padding and configured radial padding",

@@ -26,6 +26,9 @@ def metric_value(result: dict, split: str, key: str = "rel_l2_pct") -> float | N
 
 def rollout_value(result: dict, horizon: str, key: str = "rel_l2_pct") -> float | None:
     by_horizon = result.get("rollout_by_horizon") or result.get("rollouts")
+    if not by_horizon and isinstance(result.get("rollout"), dict):
+        raw = result["rollout"].get(key)
+        return None if raw is None else float(raw)
     if not isinstance(by_horizon, dict) or horizon not in by_horizon:
         return None
     raw = by_horizon[horizon].get(key)
@@ -44,6 +47,11 @@ def channel_values(result: dict, split: str) -> dict[str, float]:
 
 def rollout_channel_values(result: dict, horizon: str) -> dict[str, float]:
     by_horizon = result.get("rollout_by_horizon") or result.get("rollouts")
+    if not by_horizon and isinstance(result.get("rollout"), dict):
+        by_channel = result["rollout"].get("rel_l2_pct_by_channel")
+        if not isinstance(by_channel, dict):
+            return {}
+        return {str(channel): float(raw) for channel, raw in by_channel.items()}
     if not isinstance(by_horizon, dict) or horizon not in by_horizon:
         return {}
     by_channel = by_horizon[horizon].get("rel_l2_pct_by_channel")
@@ -64,9 +72,12 @@ def choose_horizon(results: dict, requested: str | None) -> str:
         by_horizon = result.get("rollout_by_horizon") or result.get("rollouts")
         if isinstance(by_horizon, dict):
             horizons.update(by_horizon.keys())
+        elif isinstance(result.get("rollout"), dict):
+            horizons.add(str(result.get("rollout_horizon", "single")))
     if not horizons:
         return ""
-    return str(max(int(horizon) for horizon in horizons))
+    numeric = [int(horizon) for horizon in horizons if str(horizon).isdigit()]
+    return str(max(numeric)) if numeric else sorted(horizons)[-1]
 
 
 def run_label(metrics_path: Path, payload: dict) -> str:
