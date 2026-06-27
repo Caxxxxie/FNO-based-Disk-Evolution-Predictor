@@ -43,6 +43,24 @@ artifacts/baselines/
 
 `data/`, `results/`, `outputs/`, and `artifacts/` are ignored by git.
 
+Download and unpack the checkpoint release artifacts:
+
+```bash
+mkdir -p tmp/checkpoints
+gh release download checkpoints-2026-06-28 \
+  --repo Caxxxxie/FNO-based-Disk-Evolution-Predictor \
+  --dir tmp/checkpoints
+
+cd tmp/checkpoints
+cat main_rollout_checkpoints.tar.zst.part-* > main_rollout_checkpoints.tar.zst
+cat baseline_checkpoints.tar.zst.part-* > baseline_checkpoints.tar.zst
+shasum -a 256 -c SHA256SUMS.txt
+cd ../..
+
+tar --zstd -xf tmp/checkpoints/main_rollout_checkpoints.tar.zst
+tar --zstd -xf tmp/checkpoints/baseline_checkpoints.tar.zst
+```
+
 ## Check Checkpoints
 
 ```bash
