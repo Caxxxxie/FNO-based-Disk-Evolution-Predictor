@@ -1,4 +1,4 @@
-"""Model architectures for v3.1 FARGO operator experiments."""
+"""Model architectures for FARGO operator experiments."""
 
 from __future__ import annotations
 

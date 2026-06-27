@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Diagnose rollout error growth from an existing FARGO operator checkpoint.
 
-The script loads a saved v3 checkpoint, rolls it out autoregressively, and
+The script loads a saved checkpoint, rolls it out autoregressively, and
 decomposes the error energy into low/mid/high Fourier bands at each rollout step.
 It also reports simple mass-drift and radial-flux proxy errors.
 """
@@ -29,7 +29,7 @@ ORBIT_PERIOD = 2.0 * math.pi
 
 def load_v3_module():
     candidates = [
-        ROOT / "scripts" / "benchmark_fargo_operators_v3.1.py",
+        ROOT / "scripts" / "train_fargo_operator.py",
         ROOT / "scripts" / "benchmark_fargo_operators_v3.py",
     ]
     for path in candidates:
@@ -41,7 +41,7 @@ def load_v3_module():
             sys.modules[spec.name] = module
             spec.loader.exec_module(module)
             return module
-    raise FileNotFoundError("Could not find benchmark_fargo_operators_v3.1.py or benchmark_fargo_operators_v3.py")
+    raise FileNotFoundError("Could not find train_fargo_operator.py or benchmark_fargo_operators_v3.py")
 
 
 V3 = load_v3_module()

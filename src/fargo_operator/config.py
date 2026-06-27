@@ -1,4 +1,4 @@
-"""Command-line configuration for v3.1 FARGO operator experiments."""
+"""Command-line configuration for FARGO operator experiments."""
 
 from __future__ import annotations
 

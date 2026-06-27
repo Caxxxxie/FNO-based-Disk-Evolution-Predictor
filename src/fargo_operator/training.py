@@ -1,4 +1,4 @@
-"""Training loop for v3.1 FARGO operator models."""
+"""Training loop for FARGO operator models."""
 
 from __future__ import annotations
 

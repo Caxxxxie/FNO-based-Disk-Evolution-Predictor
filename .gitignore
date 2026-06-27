@@ -5,13 +5,12 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# Local datasets and experiment outputs are reproducible/generated.
+# Local datasets, checkpoints, and experiment outputs are generated/downloaded.
 data/
 results/
 documents/
 outputs/
 artifacts/
-v3_1_repro_ckpts/
 
 # LaTeX/editor build products.
 *.aux

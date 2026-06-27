@@ -65,7 +65,7 @@ MODEL_CLI_CHOICES = tuple(sorted(set(MODEL_CHOICES + tuple(MODEL_ALIASES))))
 
 def load_v3_module():
     candidates = [
-        ROOT / "scripts" / "benchmark_fargo_operators_v3.1.py",
+        ROOT / "scripts" / "train_fargo_operator.py",
         ROOT / "scripts" / "benchmark_fargo_operators_v3.py",
     ]
     for path in candidates:
@@ -78,7 +78,7 @@ def load_v3_module():
             spec.loader.exec_module(module)
             module.__file_path__ = path
             return module
-    raise FileNotFoundError("Could not find benchmark_fargo_operators_v3.1.py or benchmark_fargo_operators_v3.py")
+    raise FileNotFoundError("Could not find train_fargo_operator.py or benchmark_fargo_operators_v3.py")
 
 
 V3 = load_v3_module()

@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Compatibility CLI for the modular v3.1 FARGO operator benchmark.
-
-The active code is split under ``src/fargo_operator/`` by responsibility:
-configuration, data, models, training, evaluation, outputs, and runner
-orchestration.
-"""
+"""CLI for training and evaluating FARGO disk-evolution operator models."""
 
 from __future__ import annotations
 

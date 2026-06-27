@@ -1,4 +1,4 @@
-"""Shared constants and result containers for v3.1 FARGO operator experiments."""
+"""Shared constants and result containers for FARGO operator experiments."""
 
 from __future__ import annotations
 

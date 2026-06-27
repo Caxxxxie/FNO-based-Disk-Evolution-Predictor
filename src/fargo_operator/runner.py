@@ -1,4 +1,4 @@
-"""End-to-end v3.1 benchmark orchestration."""
+"""End-to-end FARGO operator benchmark orchestration."""
 
 from __future__ import annotations
 
