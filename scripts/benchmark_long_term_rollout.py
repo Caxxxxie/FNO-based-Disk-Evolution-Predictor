@@ -118,6 +118,18 @@ def parse_args() -> argparse.Namespace:
         help="Number of future recurrent steps included in each training-batch autoregressive loss.",
     )
     parser.add_argument(
+        "--rollout-gradient",
+        choices=["full", "truncated"],
+        default="full",
+        help="Use truncated to stop gradients through predicted states between rollout-loss steps.",
+    )
+    parser.add_argument(
+        "--remat-model",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Recompute model activations during backprop to reduce memory use.",
+    )
+    parser.add_argument(
         "--rollout-end-orbits",
         type=float,
         nargs="+",
@@ -693,6 +705,7 @@ def train_history_model(name, model, ds, train_ends, val_ends, args, mean, std, 
         rollout_steps=args.train_rollout_steps,
     )
     params = model.init(key, init_batch)
+    apply_model = jax.checkpoint(model.apply) if args.remat_model else model.apply
     lr_schedule, _ = make_learning_rate_schedule(args)
     opt = optax.chain(optax.clip_by_global_norm(args.grad_clip_norm), optax.adam(lr_schedule))
     opt_state = opt.init(params)
@@ -716,9 +729,10 @@ def train_history_model(name, model, ds, train_ends, val_ends, args, mean, std, 
                 "case_ids": batch["case_ids"],
                 "end_ids": batch["end_ids"],
             }
-            pred = model.apply(params, step_batch)
+            pred = apply_model(params, step_batch)
             step_loss = jnp.mean(((pred - target) ** 2) * weights)
-            next_history = jnp.concatenate([history[:, 1:], pred[:, None]], axis=1)
+            next_state = jax.lax.stop_gradient(pred) if args.rollout_gradient == "truncated" else pred
+            next_history = jnp.concatenate([history[:, 1:], next_state[:, None]], axis=1)
             return next_history, step_loss
 
         _, step_losses = jax.lax.scan(rollout_step, batch["x_history"], (targets, t_steps, dt_steps))
@@ -1070,6 +1084,8 @@ def main() -> None:
             "history_stride": args.history_stride,
             "train_rollout_steps": args.train_rollout_steps,
             "training_mode": "autoregressive_rollout_loss",
+            "rollout_gradient": args.rollout_gradient,
+            "remat_model": args.remat_model,
             "optimizer": "adam",
             "learning_rate": {
                 "initial_lr": args.lr,
