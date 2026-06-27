@@ -4,9 +4,7 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
-import pickle
 import sys
 import time
 from pathlib import Path
@@ -15,20 +13,13 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
-
-def load_v31_module():
-    path = ROOT / "scripts" / "benchmark_fargo_operators_v3.1.py"
-    spec = importlib.util.spec_from_file_location("benchmark_fargo_operators_v31", path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load module spec from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-V31 = load_v31_module()
+from src.fargo_operator.checkpoints import load_fargo_checkpoint
+from src.fargo_operator.constants import to_jsonable
+from src.fargo_operator.data import FargoMemmapDataset, coordinate_grid, spatial_loss_weights
+from src.fargo_operator.evaluation import evaluate_rollout
+from src.fargo_operator.models import make_model
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,11 +39,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_checkpoint(path: Path) -> dict:
-    with path.open("rb") as f:
-        checkpoint = pickle.load(f)
-    if checkpoint.get("format") != "fargo_operator_v3_checkpoint":
-        raise ValueError(f"{path} is not a v3 operator checkpoint")
-    return checkpoint
+    return load_fargo_checkpoint(path)
 
 
 def namespace_from_checkpoint(checkpoint: dict, args: argparse.Namespace) -> argparse.Namespace:
@@ -100,19 +87,19 @@ def namespace_from_checkpoint(checkpoint: dict, args: argparse.Namespace) -> arg
 def evaluate_checkpoint(path: Path, args: argparse.Namespace) -> tuple[str, dict]:
     checkpoint = load_checkpoint(path)
     eval_args = namespace_from_checkpoint(checkpoint, args)
-    ds = V31.FargoMemmapDataset(
+    ds = FargoMemmapDataset(
         eval_args.dataset,
         eval_args.channels,
         eval_args.time_input_units,
         eval_args.dt_units,
     )
-    coords = V31.coordinate_grid(ds.r, ds.theta)
+    coords = coordinate_grid(ds.r, ds.theta)
     model_name = str(checkpoint["model"])
-    model = V31.make_model(model_name, coords, eval_args, len(eval_args.channels))
+    model = make_model(model_name, coords, eval_args, len(eval_args.channels))
     params = checkpoint["params"]
     mean = np.asarray(checkpoint["mean"], dtype=np.float32)
     std = np.asarray(checkpoint["std"], dtype=np.float32)
-    loss_weights = V31.spatial_loss_weights(ds.r, eval_args.loss_weighting)
+    loss_weights = spatial_loss_weights(ds.r, eval_args.loss_weighting)
     case_ids = ds.test_cases if ds.test_cases.size else ds.train_cases
     horizon_results = {}
     for horizon in args.horizons:
@@ -120,7 +107,7 @@ def evaluate_checkpoint(path: Path, args: argparse.Namespace) -> tuple[str, dict
             print(f"Skipping horizon {horizon}: dataset only has {ds.n_frames} frames")
             continue
         start = time.perf_counter()
-        metrics = V31.evaluate_rollout(
+        metrics = evaluate_rollout(
             model,
             params,
             ds,
@@ -132,7 +119,7 @@ def evaluate_checkpoint(path: Path, args: argparse.Namespace) -> tuple[str, dict
             int(horizon),
         )
         horizon_results[str(int(horizon))] = {
-            "metrics": V31.to_jsonable(metrics),
+            "metrics": to_jsonable(metrics),
             "wall_time_sec": time.perf_counter() - start,
         }
         rel = horizon_results[str(int(horizon))]["metrics"]["rel_l2_pct"]
@@ -175,7 +162,7 @@ def main() -> None:
             key = checkpoint_path.stem
         payload["results"][key] = result
     output_path = args.output_dir / "rollout_metrics.json"
-    output_path.write_text(json.dumps(V31.to_jsonable(payload), indent=2), encoding="utf-8")
+    output_path.write_text(json.dumps(to_jsonable(payload), indent=2), encoding="utf-8")
     print(f"Saved rollout metrics to {output_path}")
 
 

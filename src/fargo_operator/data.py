@@ -1,0 +1,280 @@
+"""Dataset loading, temporal splits, sampling, and batching."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import jax.numpy as jnp
+import numpy as np
+
+from .constants import ORBIT_PERIOD
+
+
+class FargoMemmapDataset:
+    def __init__(
+        self,
+        path: Path,
+        channels: list[str],
+        time_input_units: str = "normalized",
+        dt_units: str = "orbits",
+    ):
+        self.path = path
+        self.channels = channels
+        self.time_input_units = time_input_units
+        self.dt_units = dt_units
+        self.meta = json.loads((path / "metadata.json").read_text())
+        self.params = np.load(path / "params.npy", mmap_mode="r")
+        self.params_norm = np.load(path / "params_norm.npy", mmap_mode="r")
+        self.case_split = np.load(path / "case_split.npy", allow_pickle=False)
+        self.t_norm = np.load(path / "t_norm.npy", mmap_mode="r")
+        self.times = np.load(path / "times.npy", mmap_mode="r")
+        self.r = np.load(path / "r.npy", mmap_mode="r")
+        self.theta = np.load(path / "theta.npy", mmap_mode="r")
+        self.fields = []
+        for channel in channels:
+            channel_path = path / f"{channel}.npy"
+            if not channel_path.exists():
+                raise FileNotFoundError(f"Missing channel file: {channel_path}")
+            self.fields.append(np.load(channel_path, mmap_mode="r"))
+        self.shape = self.fields[0].shape
+        if any(field.shape != self.shape for field in self.fields):
+            raise ValueError("All channel arrays must have the same shape")
+        self.n_cases, self.n_frames, self.ny, self.nx = self.shape
+        self.n_channels = len(channels)
+        self.train_cases = np.flatnonzero(self.case_split == "train")
+        self.validation_cases = np.flatnonzero(self.case_split == "validation")
+        self.test_cases = np.flatnonzero(self.case_split == "test")
+        if self.train_cases.size == 0:
+            raise ValueError("Dataset contains no train cases")
+
+    def read_state(self, case_ids: np.ndarray, frame_ids: np.ndarray) -> np.ndarray:
+        pieces = [field[case_ids, frame_ids] for field in self.fields]
+        return np.stack(pieces, axis=-1).astype(np.float32)
+
+    def read_params(self, case_ids: np.ndarray) -> np.ndarray:
+        return np.asarray(self.params_norm[case_ids], dtype=np.float32)
+
+    def read_time_values(self, units: str, case_ids: np.ndarray, frame_ids: np.ndarray) -> np.ndarray:
+        if units == "normalized":
+            values = self.t_norm[case_ids, frame_ids]
+        elif units == "code":
+            values = self.times[case_ids, frame_ids]
+        elif units == "orbits":
+            values = self.times[case_ids, frame_ids] / ORBIT_PERIOD
+        else:
+            raise ValueError(f"Unknown time units: {units}")
+        return np.asarray(values, dtype=np.float32)
+
+    def read_time(self, case_ids: np.ndarray, start_ids: np.ndarray, spans: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        t0 = self.read_time_values(self.time_input_units, case_ids, start_ids)
+        dt0 = self.read_time_values(self.dt_units, case_ids, start_ids)
+        dt1 = self.read_time_values(self.dt_units, case_ids, start_ids + spans)
+        return t0[:, None], (dt1 - dt0)[:, None]
+
+
+def coordinate_grid(r: np.ndarray, theta: np.ndarray) -> np.ndarray:
+    r = np.asarray(r, dtype=np.float32)
+    theta = np.asarray(theta, dtype=np.float32)
+    r_norm = 2.0 * (r - r.min()) / (r.max() - r.min()) - 1.0
+    rr = np.broadcast_to(r_norm[:, None], (len(r), len(theta)))
+    ss = np.broadcast_to(np.sin(theta)[None, :], (len(r), len(theta)))
+    cc = np.broadcast_to(np.cos(theta)[None, :], (len(r), len(theta)))
+    return np.stack([rr, ss, cc], axis=-1).astype(np.float32)
+
+
+def spatial_loss_weights(r: np.ndarray, weighting: str) -> np.ndarray:
+    r = np.asarray(r, dtype=np.float32)
+    if weighting == "uniform":
+        weights = np.ones_like(r, dtype=np.float32)
+    elif weighting == "area":
+        dr = np.gradient(r).astype(np.float32)
+        weights = r * np.maximum(dr, 1.0e-12)
+    else:
+        raise ValueError(f"Unknown loss weighting: {weighting}")
+    weights = weights / np.mean(weights)
+    return weights.reshape((1, len(r), 1, 1)).astype(np.float32)
+
+
+def split_temporal_pairs(
+    t_norm: np.ndarray,
+    spans: list[int],
+    bins: int,
+    train_frac: float,
+    val_frac: float,
+    seed: int,
+) -> dict[str, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    t = np.asarray(t_norm[0], dtype=np.float64)
+    result = {"train": [], "validation": [], "test": []}
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    for span in sorted(set(spans)):
+        starts = np.arange(0, len(t) - span, dtype=np.int32)
+        mids = 0.5 * (t[starts] + t[starts + span])
+        for bin_id in range(bins):
+            if bin_id == bins - 1:
+                mask = (mids >= edges[bin_id]) & (mids <= edges[bin_id + 1])
+            else:
+                mask = (mids >= edges[bin_id]) & (mids < edges[bin_id + 1])
+            bin_starts = starts[mask]
+            if bin_starts.size == 0:
+                continue
+            rng.shuffle(bin_starts)
+            n_train = int(round(train_frac * bin_starts.size))
+            n_val = int(round(val_frac * bin_starts.size))
+            if bin_starts.size >= 3:
+                n_train = min(max(1, n_train), bin_starts.size - 2)
+                n_val = min(max(1, n_val), bin_starts.size - n_train - 1)
+            else:
+                n_train = max(1, bin_starts.size - 1)
+                n_val = 0
+            cuts = {
+                "train": bin_starts[:n_train],
+                "validation": bin_starts[n_train : n_train + n_val],
+                "test": bin_starts[n_train + n_val :],
+            }
+            for split, values in cuts.items():
+                for start in values:
+                    result[split].append((int(start), int(span), int(bin_id)))
+    packed = {}
+    for split, rows in result.items():
+        if rows:
+            packed[split] = np.asarray(rows, dtype=np.int32)
+        else:
+            packed[split] = np.zeros((0, 3), dtype=np.int32)
+    return packed
+
+
+def sample_pairs(rng: np.random.Generator, case_ids: np.ndarray, pair_rows: np.ndarray, batch_size: int):
+    if case_ids.size == 0:
+        raise ValueError("Cannot sample from an empty case split")
+    if pair_rows.shape[0] == 0:
+        raise ValueError("Cannot sample from an empty temporal pair split")
+    c = rng.choice(case_ids, size=batch_size, replace=True)
+    pidx = rng.integers(0, pair_rows.shape[0], size=batch_size)
+    pairs = pair_rows[pidx]
+    return c.astype(np.int32), pairs[:, 0].astype(np.int32), pairs[:, 1].astype(np.int32)
+
+
+def make_batch(
+    ds: FargoMemmapDataset,
+    rng: np.random.Generator,
+    case_ids: np.ndarray,
+    pair_rows: np.ndarray,
+    batch_size: int,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> dict[str, jnp.ndarray]:
+    cases, starts, spans = sample_pairs(rng, case_ids, pair_rows, batch_size)
+    prev_starts = np.maximum(starts - 1, 0)
+    x_prev_raw = ds.read_state(cases, prev_starts)
+    x_raw = ds.read_state(cases, starts)
+    y_raw = ds.read_state(cases, starts + spans)
+    x_prev = (x_prev_raw - mean.reshape((1, 1, 1, -1))) / std.reshape((1, 1, 1, -1))
+    x = (x_raw - mean.reshape((1, 1, 1, -1))) / std.reshape((1, 1, 1, -1))
+    y = (y_raw - mean.reshape((1, 1, 1, -1))) / std.reshape((1, 1, 1, -1))
+    t, dt = ds.read_time(cases, starts, spans)
+    return {
+        "x_prev": jnp.asarray(x_prev),
+        "x": jnp.asarray(x),
+        "y": jnp.asarray(y),
+        "mu": jnp.asarray(ds.read_params(cases)),
+        "t": jnp.asarray(t),
+        "dt": jnp.asarray(dt),
+    }
+
+
+def make_consistency_batch(
+    ds: FargoMemmapDataset,
+    rng: np.random.Generator,
+    case_ids: np.ndarray,
+    span_a: int,
+    span_b: int,
+    batch_size: int,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> dict[str, jnp.ndarray]:
+    max_start = ds.n_frames - span_a - span_b
+    if max_start <= 0:
+        raise ValueError("Not enough frames for consistency spans")
+    cases = rng.choice(case_ids, size=batch_size, replace=True).astype(np.int32)
+    starts = rng.integers(0, max_start, size=batch_size, dtype=np.int32)
+    spans_ab = np.full(batch_size, span_a + span_b, dtype=np.int32)
+    x_raw = ds.read_state(cases, starts)
+    y_raw = ds.read_state(cases, starts + spans_ab)
+    x = (x_raw - mean.reshape((1, 1, 1, -1))) / std.reshape((1, 1, 1, -1))
+    y = (y_raw - mean.reshape((1, 1, 1, -1))) / std.reshape((1, 1, 1, -1))
+    t_a, dt_a = ds.read_time(cases, starts, np.full(batch_size, span_a, dtype=np.int32))
+    t_b, dt_b = ds.read_time(cases, starts + span_a, np.full(batch_size, span_b, dtype=np.int32))
+    t_ab, dt_ab = ds.read_time(cases, starts, spans_ab)
+    return {
+        "x": jnp.asarray(x),
+        "y": jnp.asarray(y),
+        "mu": jnp.asarray(ds.read_params(cases)),
+        "t": jnp.asarray(t_a),
+        "dt": jnp.asarray(dt_a),
+        "t_b": jnp.asarray(t_b),
+        "dt_b": jnp.asarray(dt_b),
+        "t_ab": jnp.asarray(t_ab),
+        "dt_ab": jnp.asarray(dt_ab),
+    }
+
+
+def make_rollout_batch(
+    ds: FargoMemmapDataset,
+    rng: np.random.Generator,
+    case_ids: np.ndarray,
+    horizon: int,
+    batch_size: int,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> dict[str, jnp.ndarray]:
+    max_start = ds.n_frames - horizon
+    if max_start <= 0:
+        raise ValueError("Not enough frames for rollout training horizon")
+    cases = rng.choice(case_ids, size=batch_size, replace=True).astype(np.int32)
+    starts = rng.integers(0, max_start, size=batch_size, dtype=np.int32)
+    prev_starts = np.maximum(starts - 1, 0)
+    x_prev_raw = ds.read_state(cases, prev_starts)
+    x0_raw = ds.read_state(cases, starts)
+    targets = []
+    times = []
+    dts = []
+    one_step = np.ones(batch_size, dtype=np.int32)
+    for i in range(horizon):
+        targets.append(ds.read_state(cases, starts + i + 1))
+        t_i, dt_i = ds.read_time(cases, starts + i, one_step)
+        times.append(t_i)
+        dts.append(dt_i)
+    x_prev = (x_prev_raw - mean.reshape((1, 1, 1, -1))) / std.reshape((1, 1, 1, -1))
+    x0 = (x0_raw - mean.reshape((1, 1, 1, -1))) / std.reshape((1, 1, 1, -1))
+    y = (np.stack(targets, axis=1) - mean.reshape((1, 1, 1, 1, -1))) / std.reshape((1, 1, 1, 1, -1))
+    return {
+        "x_prev": jnp.asarray(x_prev),
+        "x0": jnp.asarray(x0),
+        "targets": jnp.asarray(y),
+        "mu": jnp.asarray(ds.read_params(cases)),
+        "t": jnp.asarray(np.stack(times, axis=1)),
+        "dt": jnp.asarray(np.stack(dts, axis=1)),
+    }
+
+
+def estimate_normalization(
+    ds: FargoMemmapDataset,
+    rng: np.random.Generator,
+    pair_rows: np.ndarray,
+    samples: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    batch_size = min(max(1, samples), 64)
+    chunks = []
+    remaining = samples
+    while remaining > 0:
+        take = min(batch_size, remaining)
+        cases, starts, spans = sample_pairs(rng, ds.train_cases, pair_rows, take)
+        chunks.append(ds.read_state(cases, starts))
+        chunks.append(ds.read_state(cases, starts + spans))
+        remaining -= take
+    values = np.concatenate([chunk.reshape((-1, ds.n_channels)) for chunk in chunks], axis=0)
+    mean = values.mean(axis=0).astype(np.float32)
+    std = (values.std(axis=0) + 1.0e-6).astype(np.float32)
+    return mean, std

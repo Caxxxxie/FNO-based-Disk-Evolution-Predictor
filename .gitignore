@@ -10,6 +10,8 @@ data/
 results/
 documents/
 outputs/
+artifacts/
+v3_1_repro_ckpts/
 
 # LaTeX/editor build products.
 *.aux
